@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Admin UI metrics
+  - job_name: 'litellm_admin'
+    static_configs:
+      - targets: ['litellm:4000']
+    metrics_path: '/metrics'
+    
+  # Proxy metrics
+  - job_name: 'litellm_proxy'
+    static_configs:
+      - targets: ['litellm_proxy:8000']
+    metrics_path: '/metrics'
+    
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

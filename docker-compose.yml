@@ -1,0 +1,126 @@
+version: "3.11"
+services:
+  # LiteLLM Proxy - Anthropic to MLX Converter
+  litellm_proxy:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: litellm_anthropic_to_mlx
+    volumes:
+      - ./proxy_config.yaml:/app/config.yaml
+    ports:
+      - "8000:8000" # Expose on port 8000
+    environment:
+      MAX_TOKENS: "8192"
+      DETAILED_DEBUG: "True"
+    command:
+      - "--config=/app/config.yaml"
+      - "--port=8000"
+      - "--detailed_debug"
+    networks:
+      - litellm_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Allow access to host for MLX connection
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/v1/models || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+      
+  # LiteLLM Admin UI - For monitoring and management
+  litellm:
+    build:
+      context: .
+      args:
+        target: runtime
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: litellm_admin
+    volumes:
+      - ./proxy_server_config.yaml:/app/config.yaml
+    ports:
+      - "4000:4000" # Admin UI port
+    environment:
+      DATABASE_URL: "postgresql://llmproxy:dbpassword9090@db:5432/litellm"
+      STORE_MODEL_IN_DB: "True" # allows adding models to proxy via UI
+    env_file:
+      - .env # Load local .env file
+    depends_on:
+      - db
+    networks:
+      - litellm_network
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:4000/health/liveliness || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # Database for LiteLLM
+  db:
+    image: postgres:16
+    container_name: litellm_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: llmproxy
+      POSTGRES_PASSWORD: dbpassword9090
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - litellm_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d litellm -U llmproxy"]
+      interval: 1s
+      timeout: 5s
+      retries: 10
+  
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus
+    container_name: litellm_prometheus
+    volumes:
+      - prometheus_data:/prometheus
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+    networks:
+      - litellm_network
+    restart: always
+    
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana
+    container_name: litellm_grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - litellm_network
+    restart: always
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+
+volumes:
+  prometheus_data:
+    driver: local
+  postgres_data:
+    name: litellm_postgres_data
+  grafana_data:
+    driver: local
+
+networks:
+  litellm_network:
+    driver: bridge
+

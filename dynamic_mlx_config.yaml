@@ -1,0 +1,55 @@
+model_list:
+  # Map any OpenAI model to the specified MLX-LM model
+  - model_name: gpt-*
+    litellm_params:
+      model: openai/mlx-community/Qwen2.5-Coder-32B-Instruct-8bit  # Default model
+      api_base: http://localhost:11433/v1  # Dynamic model port
+      max_tokens: 8192
+      # Additional headers to override mlx-lm.server default max_tokens
+      headers: {"MAX_TOKENS": "8192"}
+  
+  # Add specific models that users might request directly
+  - model_name: mlx-community/*
+    litellm_params:
+      model: openai/mlx-community/{model_name}  # Use the requested model directly
+      api_base: http://localhost:11433/v1  # Dynamic model port
+      max_tokens: 8192
+      headers: {"MAX_TOKENS": "8192"}
+  
+  # Map autocomplete requests to the dedicated autocomplete model server
+  - model_name: gpt-autocomplete
+    litellm_params:
+      model: openai/mlx-community/Qwen1.5-1.8B-Chat-8bit  # Smaller model for autocomplete
+      api_base: http://localhost:11434/v1  # Autocomplete model port
+      max_tokens: 64
+      headers: {"MAX_TOKENS": "64"}
+
+router_settings:
+  # Use our pre-call hook to ensure the requested model is loaded
+  pre_call_hooks: ["mlx_precall_hook.mlx_pre_call_hook"]
+  
+server_settings:
+  # Allow any model name format to be processed
+  allowed_model_names: ["*"]
+  
+  # Enable proxy to handle any requests
+  openai_api_base: /v1
+  
+  # Allow non-OpenAI format calls to be processed
+  allowed_routes: 
+    - "/v1/chat/completions"
+    - "/v1/completions"
+    - "/v1/models"
+    
+  # Default environment variables
+  environment_variables:
+    # Always pass max_tokens in the header
+    headers: {"MAX_TOKENS": "8192"}
+    # Configuration for the MLX wrapper
+    MLX_WRAPPER_URL: "http://127.0.0.1:11435"
+    MLX_DYNAMIC_PORT: "11433"
+    MLX_AUTOCOMPLETE_PORT: "11434"
+    MLX_MAX_WAIT_TIME: "300"
+  
+  # Custom endpoint for completions (autocomplete)
+  completion_to_chat_map: true
