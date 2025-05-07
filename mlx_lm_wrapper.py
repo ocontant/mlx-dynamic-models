@@ -51,7 +51,7 @@ DEFAULT_HOST = "127.0.0.1"
 
 
 def start_mlx_server(
-    model_name: str, port: int, max_tokens: int = 8192
+    model_name: str, port: int
 ) -> subprocess.Popen:
     """Start an MLX_LM server for the specified model."""
     logger.info(f"Starting MLX_LM server for model {model_name} on port {port}")
@@ -75,8 +75,6 @@ def start_mlx_server(
         str(port),
         "--host",
         DEFAULT_HOST,
-        "--max-tokens",
-        str(max_tokens),
         "--log-file",
         f"mlx_server_{base_model_name}_{port}.log",
     ]
@@ -171,7 +169,7 @@ def switch_model(new_model: str) -> Tuple[bool, str]:
         # Start the new model
         try:
             model_process = start_mlx_server(
-                new_model, args.dynamic_port, max_tokens=8192
+                new_model, args.dynamic_port
             )
             current_model = new_model
             return True, "Model switched successfully"
@@ -231,8 +229,7 @@ def start_servers():
     try:
         autocomplete_process = start_mlx_server(
             args.autocomplete_model,
-            args.autocomplete_port,
-            max_tokens=100,  # Lower token count for autocomplete model
+            args.autocomplete_port
         )
         logger.info(
             f"Autocomplete model server started on port {args.autocomplete_port}"
@@ -273,7 +270,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--management-port",
         type=int,
-        default={MANAGEMENT_PORT},
+        default=MANAGEMENT_PORT,
         help="Port for management API (default: 11400)",
     )
     parser.add_argument(
