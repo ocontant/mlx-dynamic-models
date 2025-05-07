@@ -4,7 +4,7 @@ MLX Pre-Call Hook for LiteLLM
 
 This script implements a pre-call hook for LiteLLM that:
 1. Extracts the requested MLX model from incoming requests
-2. Communicates with the MLX-LM wrapper to ensure the model is loaded
+2. Communicates with the MLX_LM wrapper to ensure the model is loaded
 3. Waits for the model to be ready before allowing the request to proceed
 
 Usage:
@@ -29,9 +29,9 @@ logging.basicConfig(
 logger = logging.getLogger("mlx_precall_hook")
 
 # Configuration
-MLX_WRAPPER_URL = os.environ.get("MLX_WRAPPER_URL", "http://127.0.0.1:11435")
-DYNAMIC_MODEL_PORT = int(os.environ.get("MLX_DYNAMIC_PORT", 11433))
-AUTOCOMPLETE_MODEL_PORT = int(os.environ.get("MLX_AUTOCOMPLETE_PORT", 11434))
+MLX_WRAPPER_URL = os.environ.get("MLX_WRAPPER_URL", "http://127.0.0.1:11400")
+DYNAMIC_MODEL_PORT = int(os.environ.get("MLX_DYNAMIC_PORT", 11402))
+AUTOCOMPLETE_MODEL_PORT = int(os.environ.get("MLX_AUTOCOMPLETE_PORT", 11401))
 # How long to wait for model to load
 MAX_WAIT_TIME = int(os.environ.get("MLX_MAX_WAIT_TIME", 300))  # seconds
 
@@ -68,13 +68,13 @@ def is_autocomplete_request(request_data: Dict[str, Any]) -> bool:
     
     # Check for low max_tokens which often indicates autocomplete
     max_tokens = request_data.get("max_tokens", 0)
-    if max_tokens and max_tokens <= 64:
+    if max_tokens and max_tokens <= 100:
         return True
     
     return False
 
 def wait_for_model_ready(model_name: str, port: int) -> bool:
-    """Poll the MLX-LM server until the model is ready."""
+    """Poll the MLX_LM server until the model is ready."""
     start_time = time.time()
     while (time.time() - start_time) < MAX_WAIT_TIME:
         try:
@@ -93,7 +93,7 @@ def wait_for_model_ready(model_name: str, port: int) -> bool:
     return False
 
 def ensure_model_loaded(model_name: str) -> bool:
-    """Ensure the requested model is loaded in the MLX-LM wrapper."""
+    """Ensure the requested model is loaded in the MLX_LM wrapper."""
     try:
         # Request model loading
         response = requests.post(
@@ -152,10 +152,10 @@ def mlx_pre_call_hook(
 if __name__ == "__main__":
     # Example request data
     test_request = {
-        "model": "openai/mlx-community/Qwen2.5-32B-Instruct-8bit",
+        "model": "openai/mlx-community/Qwen2.5-Coder-3B-Instruct-8bit",
         "api_base": f"http://127.0.0.1:{DYNAMIC_MODEL_PORT}/v1",
         "litellm_params": {
-            "model": "openai/mlx-community/Qwen2.5-32B-Instruct-8bit",
+            "model": "openai/mlx-community/Qwen2.5-Coder-3B-Instruct-8bit",
         },
         "max_tokens": 1024
     }

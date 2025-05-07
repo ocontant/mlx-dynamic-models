@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # Default values
-PORT=8000
-MANAGEMENT_PORT=11435
-DYNAMIC_PORT=11433
-AUTOCOMPLETE_PORT=11434
+PORT=11432
+MANAGEMENT_PORT=11400
+AUTOCOMPLETE_PORT=11401
+DYNAMIC_PORT=11402
 MAX_TOKENS=8192
-AUTOCOMPLETE_MODEL="mlx-community/Qwen1.5-1.8B-Chat-8bit"
+AUTOCOMPLETE_MODEL="mlx-community/Qwen2.5-Coder-3B-8bit"
 DEFAULT_MODEL="mlx-community/Qwen2.5-Coder-32B-Instruct-8bit"
 
 # Parse command line arguments
@@ -67,8 +67,8 @@ export MLX_DYNAMIC_PORT="$DYNAMIC_PORT"
 export MLX_AUTOCOMPLETE_PORT="$AUTOCOMPLETE_PORT"
 export MLX_MAX_WAIT_TIME="300"
 
-# Start the MLX-LM wrapper in the background
-echo "Starting MLX-LM wrapper with:"
+# Start the MLX_LM wrapper in the background
+echo "Starting MLX_LM wrapper with:"
 echo "  - Autocomplete model: $AUTOCOMPLETE_MODEL on port $AUTOCOMPLETE_PORT"
 echo "  - Dynamic model port: $DYNAMIC_PORT"
 echo "  - Management API on port $MANAGEMENT_PORT"
@@ -83,12 +83,12 @@ python mlx_lm_wrapper.py \
 WRAPPER_PID=$!
 
 # Wait for the wrapper to start
-echo "Waiting for MLX-LM wrapper to start..."
+echo "Waiting for MLX_LM wrapper to start..."
 sleep 5
 
 # Check if wrapper is still running
 if ! kill -0 $WRAPPER_PID 2>/dev/null; then
-  echo "MLX-LM wrapper failed to start. Check the logs for errors."
+  echo "MLX_LM wrapper failed to start. Check the logs for errors."
   exit 1
 fi
 
@@ -100,7 +100,7 @@ curl -X POST "http://127.0.0.1:$MANAGEMENT_PORT/load_model" \
 
 # Start the LiteLLM proxy server
 echo "Starting LiteLLM proxy server on port $PORT"
-echo "This proxy routes OpenAI API calls to MLX-LM server based on the requested model"
+echo "This proxy routes OpenAI API calls to MLX_LM server based on the requested model"
 echo "All requests are processed through the pre-call hook to ensure models are loaded"
 echo "MAX_TOKENS is set to $MAX_TOKENS"
 
