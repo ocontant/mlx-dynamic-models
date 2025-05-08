@@ -662,18 +662,32 @@ EOF
     sudo pfctl -E 2>/dev/null || true
   fi
   
+  # Try using sudo pfctl -e to make sure pf is fully enabled
+  echo "Ensuring packet filter is fully enabled..."
+  sudo pfctl -e 2>/dev/null || true
+  
   # Add our rules in a separate anchor (minimal system impact)
   echo "Adding port forwarding rules..."
-  sudo pfctl -a "$ANCHOR_NAME" -f $PF_RULES_FILE 2>/dev/null
+  # Try first without redirection to see any errors
+  sudo pfctl -a "$ANCHOR_NAME" -f $PF_RULES_FILE
   
   # Verify the rules were applied
   echo "Verifying port forwarding rules..."
   PFCTL_OUTPUT=$(sudo pfctl -a "$ANCHOR_NAME" -s nat 2>/dev/null)
+  echo "DEBUG: pfctl anchor output: '$PFCTL_OUTPUT'"
   
   if [[ -z "$PFCTL_OUTPUT" ]]; then
     echo "Failed to add rules to anchor. Trying direct rule application..."
-    sudo pfctl -f $PF_RULES_FILE
+    echo "DEBUG: Direct rule contents:"
+    cat $PF_RULES_FILE
+    
+    # Try with more verbose output
+    echo "Applying rules directly with pfctl..."
+    sudo pfctl -v -f $PF_RULES_FILE
+    
+    # Check if it worked
     PFCTL_OUTPUT=$(sudo pfctl -s nat)
+    echo "DEBUG: Direct pfctl output: '$PFCTL_OUTPUT'"
   fi
   
   # Check if port forwarding was set up successfully
@@ -724,7 +738,10 @@ LITELLM_CMD="litellm --config $TMP_CONFIG --port $PORT --detailed_debug"
 
 # Add HTTPS options if enabled
 if [[ "$ENABLE_HTTPS" == true ]]; then
-  LITELLM_CMD="$LITELLM_CMD --ssl_keyfile $SSL_KEY --ssl_certfile $SSL_CERT --ssl_port $HTTPS_PORT"
+  # LiteLLM uses --ssl_keyfile_path and --ssl_certfile_path (not ssl_keyfile/ssl_certfile)
+  LITELLM_CMD="$LITELLM_CMD --ssl_keyfile_path $SSL_KEY --ssl_certfile_path $SSL_CERT --ssl_port $HTTPS_PORT"
+  echo "Using SSL certificate: $SSL_CERT"
+  echo "Using SSL key: $SSL_KEY"
 fi
 
 # Start with verbose logging to see the requests and responses
