@@ -420,6 +420,8 @@ model_list:
 router_settings:
   # Use our pre-call hook to ensure the requested model is loaded
   pre_call_hooks: ["mlx_precall_hook.mlx_pre_call_hook"]
+  # Use our post-call hook to fix serialization issues
+  post_call_hooks: ["mlx_serialization_fix.mlx_post_call_hook"]
   
   # Enable format translations between different APIs
   # These settings allow LiteLLM to recognize requests from different API formats
