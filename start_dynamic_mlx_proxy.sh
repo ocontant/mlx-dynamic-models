@@ -359,6 +359,15 @@ done
 # Generate dynamic config file with proper variable substitution
 TMP_CONFIG=$(mktemp)
 
+# Set appropriate additional ports based on parameters
+if [[ "$USE_SUDO" == true && "$ENABLE_PORT_FORWARD" == false ]]; then
+  # If using sudo and not port forwarding, bind directly to privileged ports
+  ADDITIONAL_PORTS="[80, 443]  # Binding directly to privileged ports with sudo"
+else
+  # Otherwise, don't attempt to bind to privileged ports
+  ADDITIONAL_PORTS="[]  # Not binding to privileged ports"
+fi
+
 cat > $TMP_CONFIG << EOF
 model_list:
   # Route any OpenAI model to MLX using OpenAI-compatible endpoints
@@ -464,7 +473,7 @@ server_settings:
   # Proxy settings for port bindings
   host: "127.0.0.1"
   port: ${PORT}
-  additional_ports: [80, 443]  # Bind to standard HTTP/HTTPS ports for hostname redirection
+  additional_ports: ${ADDITIONAL_PORTS}
     
   # Default environment variables
   environment_variables:
@@ -530,6 +539,18 @@ setup_port_forwarding() {
     return 1
   fi
   
+  # Check if pfctl is available (macOS specific)
+  if ! command -v pfctl &> /dev/null; then
+    echo "Error: pfctl is required for port forwarding but is not available. This feature is macOS specific."
+    return 1
+  fi
+  
+  # Check if pf is loaded in the kernel
+  if ! sudo kldstat -q -m pf 2>/dev/null; then
+    echo "Packet filter (pf) module is not loaded. Attempting to enable..."
+    # On macOS, this might not show in kldstat, so we attempt to enable anyway
+  fi
+  
   # Create a temporary pfctl rules file
   local PF_RULES_FILE=$(mktemp)
   echo "rdr pass on lo0 inet proto tcp from any to any port 443 -> 127.0.0.1 port $PORT" > $PF_RULES_FILE
@@ -546,9 +567,21 @@ setup_port_forwarding() {
     rm $PF_RULES_FILE
     return 0
   else
-    echo "Failed to set up port forwarding."
-    rm $PF_RULES_FILE
-    return 1
+    # Try an alternative approach for macOS
+    echo "Standard method failed. Trying alternative approach for macOS..."
+    echo "rdr pass inet proto tcp from any to any port 443 -> 127.0.0.1 port $PORT" > $PF_RULES_FILE
+    sudo pfctl -f $PF_RULES_FILE
+    
+    # Check again if it worked
+    if sudo pfctl -s nat | grep -q "port 443 -> 127.0.0.1 port $PORT"; then
+      echo "Port forwarding successfully set up: 443 -> $PORT"
+      rm $PF_RULES_FILE
+      return 0
+    else
+      echo "Failed to set up port forwarding. Make sure packet filter (pf) is enabled on your system."
+      rm $PF_RULES_FILE
+      return 1
+    fi
   fi
 }
 
