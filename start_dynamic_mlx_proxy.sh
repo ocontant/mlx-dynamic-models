@@ -18,17 +18,19 @@ trap cleanup SIGINT SIGTERM EXIT
 # Create a default requirements file if it doesn't exist
 if [ ! -f "$REQUIREMENTS_FILE" ]; then
   cat > $REQUIREMENTS_FILE << EOF
-flask==3.1.0
-huggingface-hub>=0.30.2
-litellm>=1.67.2
-litellm-proxy-extras>=0.1.11
-mlx>=0.25.1
-mlx-lm>=0.23.2
+flask>=3.1.0
+huggingface-hub>=0.31.1
+pydantic>=2.11.4
+typing-extensions>=4.13.2
+litellm>=1.34.5
+anthropic>=0.3.1
+openai>=1.77.0
 requests>=2.32.3
-psutil>=3.3.9
-anthropic>=0.51.0
-openai>=1.76.0
+psutil>=7.0.0
+mlx>=0.25.1
+mlx-lm>=0.24.0
 prometheus-client>=0.21.1
+python-dotenv>=1.1.0
 EOF
   echo "Created default $REQUIREMENTS_FILE"
 fi
