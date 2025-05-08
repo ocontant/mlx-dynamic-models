@@ -27,8 +27,12 @@ The proxy handles format conversion and configuration automatically, allowing ap
 
 #### Dynamic MLX Proxy (supports model switching):
 ```bash
-./start_dynamic_mlx_proxy.sh [--port PORT] [--max-tokens MAX_TOKENS] [--autocomplete-model MODEL] [--default-model MODEL]
+./start_dynamic_mlx_proxy.sh [--port PORT] [--max-tokens MAX_TOKENS] [--autocomplete-model MODEL] [--default-model MODEL] [--enable-port-forward] [--use-sudo]
 ```
+
+Additional parameters:
+- `--enable-port-forward`: Set up port forwarding from port 443 to the LiteLLM port using macOS pfctl
+- `--use-sudo`: Run LiteLLM proxy with sudo to allow binding directly to privileged ports
 
 #### Direct Host Method (Anthropic to Qwen):
 ```bash

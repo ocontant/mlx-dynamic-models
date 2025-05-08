@@ -11,6 +11,8 @@ DEFAULT_MODEL="mlx-community/Qwen2.5-Coder-32B-Instruct-8bit"
 PYTHON_VERSION="3.11.12"
 MLX_ENV_NAME="mlx"
 REQUIREMENTS_FILE="requirements.txt"
+USE_SUDO=false  # Flag to control sudo usage for LiteLLM
+ENABLE_PORT_FORWARD=false  # Flag to enable port forwarding from 443 to LiteLLM port
 
 # Trap to handle shutdown and cleanup
 trap cleanup SIGINT SIGTERM EXIT
@@ -318,6 +320,14 @@ while [[ $# -gt 0 ]]; do
       install_dependencies
       exit $?
       ;;
+    --use-sudo)
+      USE_SUDO=true
+      shift # past argument
+      ;;
+    --enable-port-forward)
+      ENABLE_PORT_FORWARD=true
+      shift # past argument
+      ;;
     --help)
       echo "Usage: $0 [options]"
       echo ""
@@ -331,6 +341,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --default-model MODEL          Set the default model (default: mlx-community/Qwen2.5-Coder-32B-Instruct-8bit)"
       echo "  --download-model MODEL         Download a model from Hugging Face"
       echo "  --install-dependencies         Install pyenv, Python and all required dependencies"
+      echo "  --use-sudo                     Run LiteLLM proxy with sudo to bind to privileged ports"
+      echo "  --enable-port-forward          Enable port forwarding from port 443 to LiteLLM port"
       echo "  --help                         Show this help message"
       exit 0
       ;;
@@ -508,8 +520,51 @@ curl -X POST "http://127.0.0.1:$MANAGEMENT_PORT/load_model" \
   -H "Content-Type: application/json" \
   -d "{\"model\": \"$DEFAULT_MODEL\"}"
 
+# Function to set up port forwarding
+setup_port_forwarding() {
+  echo "Setting up port forwarding from port 443 to $PORT..."
+  
+  # Check if sudo is available and we have permissions
+  if ! command -v sudo &> /dev/null; then
+    echo "Error: sudo is required for port forwarding but is not available."
+    return 1
+  fi
+  
+  # Create a temporary pfctl rules file
+  local PF_RULES_FILE=$(mktemp)
+  echo "rdr pass on lo0 inet proto tcp from any to any port 443 -> 127.0.0.1 port $PORT" > $PF_RULES_FILE
+  
+  # Enable pfctl if not already enabled
+  sudo pfctl -e 2>/dev/null || true
+  
+  # Load the rules
+  sudo pfctl -f $PF_RULES_FILE
+  
+  # Check if port forwarding was set up successfully
+  if sudo pfctl -s nat | grep -q "port 443 -> 127.0.0.1 port $PORT"; then
+    echo "Port forwarding successfully set up: 443 -> $PORT"
+    rm $PF_RULES_FILE
+    return 0
+  else
+    echo "Failed to set up port forwarding."
+    rm $PF_RULES_FILE
+    return 1
+  fi
+}
+
+# Set up port forwarding if requested
+if [[ "$ENABLE_PORT_FORWARD" == true ]]; then
+  setup_port_forwarding
+  if [ $? -ne 0 ]; then
+    echo "WARNING: Failed to set up port forwarding. Continuing without it."
+  fi
+fi
+
 # Start the LiteLLM proxy server
 echo "Starting LiteLLM proxy server on port $PORT"
+if [[ "$ENABLE_PORT_FORWARD" == true && $? -eq 0 ]]; then
+  echo "With port forwarding from 443 -> $PORT"
+fi
 echo "This proxy routes OpenAI API calls to MLX_LM server based on the requested model"
 echo "All requests are processed through the pre-call hook to ensure models are loaded"
 echo "MAX_TOKENS is set to $MAX_TOKENS"
@@ -518,7 +573,12 @@ echo "MAX_TOKENS is set to $MAX_TOKENS"
 # Just make sure the PYTHONPATH includes current directory
 
 # Start with verbose logging to see the requests and responses
-PYTHONPATH="$PWD:$PYTHONPATH" litellm --config $TMP_CONFIG --port $PORT --detailed_debug
+if [[ "$USE_SUDO" == true ]]; then
+  echo "Running LiteLLM with sudo to bind to privileged ports..."
+  sudo PYTHONPATH="$PWD:$PYTHONPATH" litellm --config $TMP_CONFIG --port $PORT --detailed_debug
+else
+  PYTHONPATH="$PWD:$PYTHONPATH" litellm --config $TMP_CONFIG --port $PORT --detailed_debug
+fi
 
 # Define cleanup function to handle graceful shutdown
 cleanup() {
@@ -540,6 +600,17 @@ cleanup() {
   if [ -f "$TMP_CONFIG" ]; then
     echo "Removing temporary config file..."
     rm $TMP_CONFIG
+  fi
+  
+  # Remove port forwarding rules if they were set up
+  if [[ "$ENABLE_PORT_FORWARD" == true ]]; then
+    echo "Removing port forwarding rules..."
+    # Create a temporary empty rules file
+    local PF_RULES_FILE=$(mktemp)
+    echo "" > $PF_RULES_FILE
+    # Apply the empty rules file to clear forwarding
+    sudo pfctl -f $PF_RULES_FILE 2>/dev/null || true
+    rm $PF_RULES_FILE
   fi
   
   echo "Shutdown complete."
