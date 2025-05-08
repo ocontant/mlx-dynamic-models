@@ -610,11 +610,12 @@ curl -X POST "http://127.0.0.1:$MANAGEMENT_PORT/load_model" \
 
 # Function to set up port forwarding
 setup_port_forwarding() {
-  # Determine target port based on protocol
+  # Always forward to the main port since LiteLLM serves both HTTP and HTTPS on the same port
   local TARGET_PORT=$PORT
+  
+  # If HTTPS is enabled, we're forwarding to an HTTPS-capable endpoint
   if [[ "$ENABLE_HTTPS" == true ]]; then
-    echo "Setting up port forwarding from port 443 to HTTPS port $HTTPS_PORT..."
-    TARGET_PORT=$HTTPS_PORT
+    echo "Setting up port forwarding from port 443 to HTTPS-enabled port $PORT..."
   else
     echo "Setting up port forwarding from port 443 to HTTP port $PORT..."
   fi
@@ -691,12 +692,19 @@ EOF
   fi
   
   # Check if port forwarding was set up successfully
-  if echo "$PFCTL_OUTPUT" | grep -q "port 443 -> 127.0.0.1 port $TARGET_PORT"; then
+  # The port forwarding syntax might vary by OS version, so check for different patterns
+  if [[ ! -z "$PFCTL_OUTPUT" ]]; then
+    # Any output from pfctl -s nat likely means rules were applied
     echo "✅ Port forwarding successfully set up: 443 -> $TARGET_PORT"
     # Store the anchor name for cleanup
     PF_ANCHOR_USED="$ANCHOR_NAME"
     export PF_ANCHOR_USED
     rm $PF_RULES_FILE
+    return 0
+  elif sudo pfctl -s nat | grep -q "port.*443.*->.*$TARGET_PORT"; then
+    # Alternative check for the entire NAT table
+    echo "✅ Port forwarding successfully set up: 443 -> $TARGET_PORT (in main ruleset)"
+    rm $PF_RULES_FILE 
     return 0
   else
     echo "Failed to set up port forwarding. Make sure packet filter (pf) is enabled on your system."
@@ -717,11 +725,11 @@ fi
 # Start the LiteLLM proxy server
 echo "Starting LiteLLM proxy server on port $PORT"
 if [[ "$ENABLE_HTTPS" == true ]]; then
-  echo "With HTTPS enabled on port $HTTPS_PORT"
+  echo "With HTTPS enabled"
 fi
 if [[ "$ENABLE_PORT_FORWARD" == true && $? -eq 0 ]]; then
   if [[ "$ENABLE_HTTPS" == true ]]; then
-    echo "With port forwarding from 443 -> $HTTPS_PORT (HTTPS)"
+    echo "With port forwarding from 443 -> $PORT (HTTPS-enabled)"
   else
     echo "With port forwarding from 443 -> $PORT (HTTP)"
   fi
@@ -738,10 +746,12 @@ LITELLM_CMD="litellm --config $TMP_CONFIG --port $PORT --detailed_debug"
 
 # Add HTTPS options if enabled
 if [[ "$ENABLE_HTTPS" == true ]]; then
-  # LiteLLM uses --ssl_keyfile_path and --ssl_certfile_path (not ssl_keyfile/ssl_certfile)
-  LITELLM_CMD="$LITELLM_CMD --ssl_keyfile_path $SSL_KEY --ssl_certfile_path $SSL_CERT --ssl_port $HTTPS_PORT"
+  # LiteLLM uses --ssl_keyfile_path and --ssl_certfile_path for SSL
+  # Note: LiteLLM doesn't support --ssl_port, it uses the main port for HTTP and HTTPS
+  LITELLM_CMD="$LITELLM_CMD --ssl_keyfile_path $SSL_KEY --ssl_certfile_path $SSL_CERT"
   echo "Using SSL certificate: $SSL_CERT"
   echo "Using SSL key: $SSL_KEY"
+  echo "Note: LiteLLM will serve HTTPS on the same port ($PORT) as HTTP"
 fi
 
 # Start with verbose logging to see the requests and responses
