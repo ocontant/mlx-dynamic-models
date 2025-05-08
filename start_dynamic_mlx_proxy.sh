@@ -641,10 +641,10 @@ setup_port_forwarding() {
 # Temporary port forwarding ruleset for LiteLLM Proxy
 # Forward port 443 to port $TARGET_PORT
 
-# Skip on loopback to prevent interference with other services
-set skip on lo0
+# Direct pass-through and redirect for loopback traffic (necessary for macOS localhost)
+pass in quick on lo0 inet proto tcp from any to 127.0.0.1 port 443 rdr-to 127.0.0.1 port $TARGET_PORT
 
-# Port forwarding rule
+# General port forwarding rule for non-loopback traffic
 rdr pass inet proto tcp from any to any port 443 -> 127.0.0.1 port $TARGET_PORT
 EOF
 
