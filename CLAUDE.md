@@ -43,7 +43,35 @@ The `--enable-https` option automatically:
 2. Configures LiteLLM to use both HTTP and HTTPS ports
 3. When combined with `--enable-port-forward`, forwards external port 443 to the HTTPS port
 
-For production use, you can replace the auto-generated self-signed certificates with your own trusted certificates by placing them in the ./ssl/ directory as cert.pem and key.pem.
+You can also specify a custom domain for the SSL certificate:
+```bash
+./start_dynamic_mlx_proxy.sh --enable-https --ssl-domain api.anthropic.com
+```
+
+This is especially useful for intercepting API calls from applications that expect to connect to specific API providers like api.anthropic.com. When used with port forwarding, any requests to the specified domain on port 443 will be redirected to your local LiteLLM proxy.
+
+##### Spoofing API Provider Domains
+
+To intercept requests to api.anthropic.com or other API providers:
+
+1. Generate a certificate for the target domain:
+   ```bash
+   ./start_dynamic_mlx_proxy.sh --enable-https --ssl-domain api.anthropic.com --enable-port-forward
+   ```
+
+2. Add a hosts file entry to redirect the domain to your local machine:
+   ```bash
+   sudo bash -c "echo '127.0.0.1  api.anthropic.com' >> /etc/hosts"
+   ```
+
+3. Make your applications trust the generated certificate, or use the "--ssl-insecure" flag in curl/similar tools for testing
+
+##### Custom Certificates
+
+For production use, you can replace the auto-generated self-signed certificates with your own trusted certificates by placing them in the ./ssl/ directory. The files are named based on the domain:
+
+- For localhost: cert.pem and key.pem
+- For custom domains: cert_domainname.pem and key_domainname.pem (where "domainname" is the domain with dots and colons removed)
 
 #### Direct Host Method (Anthropic to Qwen):
 ```bash

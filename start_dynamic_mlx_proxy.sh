@@ -15,6 +15,7 @@ REQUIREMENTS_FILE="requirements.txt"
 USE_SUDO=false  # Flag to control sudo usage for LiteLLM
 ENABLE_PORT_FORWARD=false  # Flag to enable port forwarding from 443 to LiteLLM port
 ENABLE_HTTPS=false  # Flag to enable HTTPS support
+SSL_DOMAIN="localhost"  # Default domain for SSL certificate
 
 # Trap to handle shutdown and cleanup
 trap cleanup SIGINT SIGTERM EXIT
@@ -339,6 +340,11 @@ while [[ $# -gt 0 ]]; do
       ENABLE_HTTPS=true
       shift # past argument
       ;;
+    --ssl-domain)
+      SSL_DOMAIN="$2"
+      shift # past argument
+      shift # past value
+      ;;
     --help)
       echo "Usage: $0 [options]"
       echo ""
@@ -356,6 +362,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --use-sudo                     Run LiteLLM proxy with sudo to bind to privileged ports"
       echo "  --enable-port-forward          Enable port forwarding from port 443 to LiteLLM port"
       echo "  --enable-https                 Enable HTTPS support with self-signed certificates"
+      echo "  --ssl-domain DOMAIN            Domain name for SSL certificate (default: localhost)"
+      echo "                                 Example: --ssl-domain api.anthropic.com"
       echo "  --help                         Show this help message"
       exit 0
       ;;
@@ -393,11 +401,26 @@ if [[ "$ENABLE_HTTPS" == true ]]; then
     mkdir -p "$SSL_DIR"
   fi
   
+  # Define subject alternative names based on domain
+  if [[ "$SSL_DOMAIN" == "localhost" ]]; then
+    SAN_EXTENSIONS="subjectAltName=DNS:localhost,IP:127.0.0.1"
+  else
+    # For custom domains, include both the domain and localhost
+    SAN_EXTENSIONS="subjectAltName=DNS:$SSL_DOMAIN,DNS:localhost,IP:127.0.0.1"
+  fi
+  
+  # Create a certificate name that includes the domain to avoid conflicts
+  CERT_SUFFIX=$(echo "$SSL_DOMAIN" | tr -d '.' | tr -d ':')
+  SSL_CERT="${SSL_DIR}/cert_${CERT_SUFFIX}.pem"
+  SSL_KEY="${SSL_DIR}/key_${CERT_SUFFIX}.pem"
+  
   # Check if certificates already exist
   if [ ! -f "$SSL_CERT" ] || [ ! -f "$SSL_KEY" ]; then
-    echo "Generating self-signed SSL certificates for HTTPS..."
+    echo "Generating self-signed SSL certificates for domain: $SSL_DOMAIN..."
+    
     # Generate a self-signed certificate valid for 365 days
-    openssl req -x509 -newkey rsa:4096 -keyout "$SSL_KEY" -out "$SSL_CERT" -days 365 -nodes -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+    openssl req -x509 -newkey rsa:4096 -keyout "$SSL_KEY" -out "$SSL_CERT" -days 365 -nodes \
+      -subj "/CN=$SSL_DOMAIN" -addext "$SAN_EXTENSIONS"
     
     if [ $? -ne 0 ]; then
       echo "Failed to generate SSL certificates. Make sure openssl is installed."
@@ -405,9 +428,22 @@ if [[ "$ENABLE_HTTPS" == true ]]; then
       ENABLE_HTTPS=false
     else
       echo "SSL certificates generated successfully at ${SSL_DIR}"
+      echo "Certificate is valid for: $SSL_DOMAIN"
     fi
   else
     echo "Using existing SSL certificates from ${SSL_DIR}"
+    echo "Certificate is configured for: $SSL_DOMAIN"
+  fi
+  
+  # If the domain is api.anthropic.com, suggest adding a hosts entry
+  if [[ "$SSL_DOMAIN" == "api.anthropic.com" ]]; then
+    echo ""
+    echo "IMPORTANT: For local testing with api.anthropic.com, add the following entry to your /etc/hosts file:"
+    echo "127.0.0.1  api.anthropic.com"
+    echo ""
+    echo "You can do this by running:"
+    echo "sudo bash -c \"echo '127.0.0.1  api.anthropic.com' >> /etc/hosts\""
+    echo ""
   fi
 fi
 
@@ -603,7 +639,24 @@ setup_port_forwarding() {
   
   # Create a temporary pfctl rules file
   local PF_RULES_FILE=$(mktemp)
-  echo "rdr pass on lo0 inet proto tcp from any to any port 443 -> 127.0.0.1 port $TARGET_PORT" > $PF_RULES_FILE
+  
+  # Create pf rules based on whether a specific domain is used
+  if [[ "$SSL_DOMAIN" != "localhost" ]]; then
+    # Domain-specific port forwarding
+    echo "Setting up domain-specific routing for ${SSL_DOMAIN}..."
+    
+    # Create rules for both the domain and for localhost
+    cat > $PF_RULES_FILE << EOF
+# Redirect HTTPS traffic for the specific domain to our HTTPS port
+rdr pass on lo0 inet proto tcp from any to any port 443 -> 127.0.0.1 port $TARGET_PORT
+rdr pass inet proto tcp from any to any port 443 -> 127.0.0.1 port $TARGET_PORT
+EOF
+    
+    echo "NOTE: Make sure ${SSL_DOMAIN} resolves to 127.0.0.1 in your hosts file"
+  else
+    # Standard port forwarding for localhost
+    echo "rdr pass on lo0 inet proto tcp from any to any port 443 -> 127.0.0.1 port $TARGET_PORT" > $PF_RULES_FILE
+  fi
   
   # Enable pfctl if not already enabled
   sudo pfctl -e 2>/dev/null || true
@@ -614,17 +667,33 @@ setup_port_forwarding() {
   # Check if port forwarding was set up successfully
   if sudo pfctl -s nat | grep -q "port 443 -> 127.0.0.1 port $TARGET_PORT"; then
     echo "Port forwarding successfully set up: 443 -> $TARGET_PORT"
+    if [[ "$SSL_DOMAIN" != "localhost" ]]; then
+      echo "✅ Port 443 traffic for ${SSL_DOMAIN} will be routed to port $TARGET_PORT"
+    fi
     rm $PF_RULES_FILE
     return 0
   else
     # Try an alternative approach for macOS
     echo "Standard method failed. Trying alternative approach for macOS..."
-    echo "rdr pass inet proto tcp from any to any port 443 -> 127.0.0.1 port $TARGET_PORT" > $PF_RULES_FILE
+    
+    if [[ "$SSL_DOMAIN" != "localhost" ]]; then
+      # Domain-specific alternative approach
+      cat > $PF_RULES_FILE << EOF
+rdr pass inet proto tcp from any to any port 443 -> 127.0.0.1 port $TARGET_PORT
+EOF
+    else
+      # Standard alternative approach
+      echo "rdr pass inet proto tcp from any to any port 443 -> 127.0.0.1 port $TARGET_PORT" > $PF_RULES_FILE
+    fi
+    
     sudo pfctl -f $PF_RULES_FILE
     
     # Check again if it worked
     if sudo pfctl -s nat | grep -q "port 443 -> 127.0.0.1 port $TARGET_PORT"; then
       echo "Port forwarding successfully set up: 443 -> $TARGET_PORT"
+      if [[ "$SSL_DOMAIN" != "localhost" ]]; then
+        echo "✅ Port 443 traffic for ${SSL_DOMAIN} will be routed to port $TARGET_PORT"
+      fi
       rm $PF_RULES_FILE
       return 0
     else
