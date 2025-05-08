@@ -615,8 +615,10 @@ setup_port_forwarding() {
   if [[ "$ENABLE_HTTPS" == true ]]; then
     echo "Setting up port forwarding from port 443 to HTTPS port $HTTPS_PORT..."
     TARGET_PORT=$HTTPS_PORT
+    echo "DEBUG: TARGET_PORT set to $TARGET_PORT for HTTPS"
   else
     echo "Setting up port forwarding from port 443 to HTTP port $PORT..."
+    echo "DEBUG: TARGET_PORT set to $TARGET_PORT for HTTP"
   fi
   
   # Check if sudo is available and we have permissions
@@ -652,20 +654,60 @@ rdr pass on lo0 inet proto tcp from any to any port 443 -> 127.0.0.1 port $TARGE
 rdr pass inet proto tcp from any to any port 443 -> 127.0.0.1 port $TARGET_PORT
 EOF
     
+    echo "DEBUG: Created domain-specific forwarding rules for ${SSL_DOMAIN}:"
+    cat $PF_RULES_FILE
     echo "NOTE: Make sure ${SSL_DOMAIN} resolves to 127.0.0.1 in your hosts file"
   else
     # Standard port forwarding for localhost
     echo "rdr pass on lo0 inet proto tcp from any to any port 443 -> 127.0.0.1 port $TARGET_PORT" > $PF_RULES_FILE
+    echo "DEBUG: Created standard forwarding rule:"
+    cat $PF_RULES_FILE
   fi
   
   # Enable pfctl if not already enabled
   sudo pfctl -e 2>/dev/null || true
   
-  # Load the rules
-  sudo pfctl -f $PF_RULES_FILE
+  # Check if pf.conf is properly configured for anchors
+  echo "DEBUG: Checking if pf.conf has required anchor configuration..."
+  if ! sudo grep -q "rdr-anchor" /etc/pf.conf; then
+    echo "WARNING: Your pf.conf file might be missing rdr-anchor configuration."
+    echo "Creating a temporary backup of /etc/pf.conf..."
+    
+    # Create a backup of the current pf.conf
+    sudo cp /etc/pf.conf /etc/pf.conf.backup
+    
+    # Add the necessary anchor lines to pf.conf
+    echo "Adding required anchor configuration to pf.conf..."
+    if ! sudo grep -q "rdr-anchor \"com.litellm\"" /etc/pf.conf; then
+      echo "Adding rdr-anchor line to pf.conf"
+      sudo sh -c "echo 'rdr-anchor \"com.litellm\"' >> /etc/pf.conf"
+    fi
+    
+    # Create the anchor file if it doesn't exist
+    sudo mkdir -p /etc/pf.anchors
+    sudo cp $PF_RULES_FILE /etc/pf.anchors/com.litellm
+    
+    # Add load anchor line if it doesn't exist
+    if ! sudo grep -q "load anchor \"com.litellm\"" /etc/pf.conf; then
+      echo "Adding load anchor line to pf.conf"
+      sudo sh -c "echo 'load anchor \"com.litellm\" from \"/etc/pf.anchors/com.litellm\"' >> /etc/pf.conf"
+    fi
+    
+    # Load the complete pf.conf
+    echo "Loading full pf configuration with anchors..."
+    sudo pfctl -f /etc/pf.conf
+  else
+    # Just load our rules directly
+    echo "Loading port forwarding rules..."
+    sudo pfctl -f $PF_RULES_FILE
+  fi
   
   # Check if port forwarding was set up successfully
-  if sudo pfctl -s nat | grep -q "port 443 -> 127.0.0.1 port $TARGET_PORT"; then
+  echo "DEBUG: Running 'sudo pfctl -s nat' to verify port forwarding:"
+  PFCTL_OUTPUT=$(sudo pfctl -s nat)
+  echo "$PFCTL_OUTPUT"
+  
+  if echo "$PFCTL_OUTPUT" | grep -q "port 443 -> 127.0.0.1 port $TARGET_PORT"; then
     echo "Port forwarding successfully set up: 443 -> $TARGET_PORT"
     if [[ "$SSL_DOMAIN" != "localhost" ]]; then
       echo "✅ Port 443 traffic for ${SSL_DOMAIN} will be routed to port $TARGET_PORT"
@@ -689,7 +731,11 @@ EOF
     sudo pfctl -f $PF_RULES_FILE
     
     # Check again if it worked
-    if sudo pfctl -s nat | grep -q "port 443 -> 127.0.0.1 port $TARGET_PORT"; then
+    echo "DEBUG: Running 'sudo pfctl -s nat' again to verify alternative method:"
+    PFCTL_OUTPUT=$(sudo pfctl -s nat)
+    echo "$PFCTL_OUTPUT"
+    
+    if echo "$PFCTL_OUTPUT" | grep -q "port 443 -> 127.0.0.1 port $TARGET_PORT"; then
       echo "Port forwarding successfully set up: 443 -> $TARGET_PORT"
       if [[ "$SSL_DOMAIN" != "localhost" ]]; then
         echo "✅ Port 443 traffic for ${SSL_DOMAIN} will be routed to port $TARGET_PORT"
@@ -772,12 +818,23 @@ cleanup() {
   # Remove port forwarding rules if they were set up
   if [[ "$ENABLE_PORT_FORWARD" == true ]]; then
     echo "Removing port forwarding rules..."
-    # Create a temporary empty rules file
-    local PF_RULES_FILE=$(mktemp)
-    echo "" > $PF_RULES_FILE
-    # Apply the empty rules file to clear forwarding
-    sudo pfctl -f $PF_RULES_FILE 2>/dev/null || true
-    rm $PF_RULES_FILE
+    
+    # Check if we're using anchors
+    if sudo grep -q "rdr-anchor \"com.litellm\"" /etc/pf.conf; then
+      # Clear the anchor file contents but keep the structure
+      echo "Clearing anchor file com.litellm..."
+      echo "" | sudo tee /etc/pf.anchors/com.litellm > /dev/null
+      sudo pfctl -f /etc/pf.conf 2>/dev/null || true
+    else
+      # Create a temporary empty rules file
+      local PF_RULES_FILE=$(mktemp)
+      echo "" > $PF_RULES_FILE
+      # Apply the empty rules file to clear forwarding
+      sudo pfctl -f $PF_RULES_FILE 2>/dev/null || true
+      rm $PF_RULES_FILE
+    fi
+    
+    echo "Port forwarding rules have been removed."
   fi
   
   echo "Shutdown complete."
