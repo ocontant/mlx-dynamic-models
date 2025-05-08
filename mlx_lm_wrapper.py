@@ -50,17 +50,27 @@ DEFAULT_DYNAMIC_PORT = 11402
 DEFAULT_HOST = "127.0.0.1"
 
 
-def start_mlx_server(
-    model_name: str, port: int
-) -> subprocess.Popen:
+def start_mlx_server(model_name: str, port: int) -> subprocess.Popen:
     """Start an MLX_LM server for the specified model."""
     logger.info(f"Starting MLX_LM server for model {model_name} on port {port}")
 
-    # Format model name correctly for mlx-lm.server
+    # Format model name correctly for mlx-lm.server by stripping provider prefixes
+    if model_name.startswith("openai/"):
+        model_name = model_name[7:]  # Strip "openai/" prefix
+        
+    # Now ensure we have the mlx-community prefix
     if not model_name.startswith("mlx-community/"):
-        if model_name.startswith("openai/mlx-community/"):
-            model_name = model_name[7:]  # Remove "openai/" prefix
-        elif not model_name.startswith("mlx-community/"):
+        if "/" in model_name:
+            # Handle various prefix patterns and extract the model name
+            parts = model_name.split("/")
+            if len(parts) > 1 and parts[-2] == "mlx-community":
+                # Case like "mlx-community/model"
+                model_name = f"mlx-community/{parts[-1]}"
+            else:
+                # Unknown format, try to use as is with mlx-community prefix
+                model_name = f"mlx-community/{parts[-1]}"
+        else:
+            # No slashes, just add the prefix
             model_name = f"mlx-community/{model_name}"
 
     # Extract base model name without mlx-community/ prefix for logging
@@ -75,8 +85,8 @@ def start_mlx_server(
         str(port),
         "--host",
         DEFAULT_HOST,
-        "--log-file",
-        f"mlx_server_{base_model_name}_{port}.log",
+        "--log-level",
+        "DEBUG",
     ]
 
     # Start the process
@@ -168,9 +178,7 @@ def switch_model(new_model: str) -> Tuple[bool, str]:
 
         # Start the new model
         try:
-            model_process = start_mlx_server(
-                new_model, args.dynamic_port
-            )
+            model_process = start_mlx_server(new_model, args.dynamic_port)
             current_model = new_model
             return True, "Model switched successfully"
         except Exception as e:
@@ -228,8 +236,7 @@ def start_servers():
     # Start the autocomplete model server
     try:
         autocomplete_process = start_mlx_server(
-            args.autocomplete_model,
-            args.autocomplete_port
+            args.autocomplete_model, args.autocomplete_port
         )
         logger.info(
             f"Autocomplete model server started on port {args.autocomplete_port}"
@@ -246,6 +253,9 @@ def cleanup():
     logger.info("Cleaning up processes...")
     kill_process(model_process)
     kill_process(autocomplete_process)
+    # Exit the process after cleanup to ensure no hanging threads
+    logger.info("Cleanup completed, exiting...")
+    os._exit(0)
 
 
 if __name__ == "__main__":
@@ -281,10 +291,14 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Register cleanup handler
+    # Register cleanup handler for graceful shutdown
     import atexit
+    import signal
 
+    # Register the cleanup function for both normal exit and signals
     atexit.register(cleanup)
+    signal.signal(signal.SIGTERM, lambda sig, frame: cleanup())
+    signal.signal(signal.SIGINT, lambda sig, frame: cleanup())
 
     # Start the servers
     if start_servers():
@@ -296,8 +310,15 @@ if __name__ == "__main__":
         )
         logger.info("Use /load_model endpoint to load dynamic models")
 
-        # Run the Flask app for model management
-        app.run(host=args.host, port=args.management_port, debug=False)
+        try:
+            # Run the Flask app for model management
+            app.run(host=args.host, port=args.management_port, debug=False)
+        except KeyboardInterrupt:
+            logger.info("Received keyboard interrupt, shutting down...")
+            cleanup()
+        except Exception as e:
+            logger.error(f"Error in Flask app: {e}")
+            cleanup()
     else:
         logger.error("Failed to start MLX_LM wrapper")
         cleanup()

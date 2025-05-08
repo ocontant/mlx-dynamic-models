@@ -6,6 +6,7 @@ This script implements a pre-call hook for LiteLLM that:
 1. Extracts the requested MLX model from incoming requests
 2. Communicates with the MLX_LM wrapper to ensure the model is loaded
 3. Waits for the model to be ready before allowing the request to proceed
+4. Monitors wrapper availability and terminates if wrapper is down
 
 Usage:
     Include this in your LiteLLM config under router_settings.pre_call_hooks
@@ -19,6 +20,8 @@ import os
 import time
 import logging
 import requests
+import sys
+import signal
 from typing import Dict, Any, List, Optional, Union
 
 # Configure logging
@@ -35,24 +38,44 @@ AUTOCOMPLETE_MODEL_PORT = int(os.environ.get("MLX_AUTOCOMPLETE_PORT", 11401))
 # How long to wait for model to load
 MAX_WAIT_TIME = int(os.environ.get("MLX_MAX_WAIT_TIME", 300))  # seconds
 
+# Track wrapper availability
+WRAPPER_AVAILABILITY_CHECK_COUNT = 0
+WRAPPER_MAX_FAILURES = 3  # Number of consecutive failures before terminating
+
 def extract_model_name(request_data: Dict[str, Any]) -> Optional[str]:
-    """Extract the model name from the request data."""
+    """
+    Extract the model name from the request data.
+    
+    With openai_compatible provider, we just need to make sure the model name
+    is in the correct format for the MLX-LM server.
+    """
     # Extract from model field
     model = request_data.get("model", "")
     
-    # If it's already an MLX model, return it
-    if "mlx-community" in model:
+    # If it's already an MLX model with mlx-community prefix, return it
+    if model.startswith("mlx-community/"):
         return model
     
     # Check for routing through litellm_params
     litellm_params = request_data.get("litellm_params", {})
     if litellm_params and "model" in litellm_params:
         model = litellm_params["model"]
-        if "mlx-community" in model:
+        if model.startswith("mlx-community/"):
             return model
     
-    # If we didn't find an MLX model, return None
-    return None
+    # Handle various formats
+    if "/" in model:
+        parts = model.split("/")
+        # Check if it has a provider prefix with mlx-community
+        if len(parts) > 2 and parts[-2] == "mlx-community":
+            # Just return mlx-community/model part
+            return f"mlx-community/{parts[-1]}"
+        # For other formats, extract the model name
+        base_model_name = parts[-1]
+        return f"mlx-community/{base_model_name}"
+    
+    # For bare model names, add the mlx-community prefix
+    return f"mlx-community/{model}"
 
 def is_autocomplete_request(request_data: Dict[str, Any]) -> bool:
     """Determine if this is an autocomplete request."""
@@ -92,10 +115,42 @@ def wait_for_model_ready(model_name: str, port: int) -> bool:
     logger.error(f"Timed out waiting for model {model_name} to be ready")
     return False
 
+def check_wrapper_availability() -> bool:
+    """Check if the MLX wrapper is available and terminate if it's not after multiple failures."""
+    global WRAPPER_AVAILABILITY_CHECK_COUNT
+    
+    try:
+        response = requests.get(f"{MLX_WRAPPER_URL}/status", timeout=2)
+        if response.status_code == 200:
+            # Reset counter on success
+            WRAPPER_AVAILABILITY_CHECK_COUNT = 0
+            return True
+    except requests.RequestException:
+        # Increment failure counter
+        WRAPPER_AVAILABILITY_CHECK_COUNT += 1
+        logger.warning(f"Failed to connect to MLX wrapper. Failure {WRAPPER_AVAILABILITY_CHECK_COUNT}/{WRAPPER_MAX_FAILURES}")
+        
+        # If we've reached the maximum failures, terminate the process
+        if WRAPPER_AVAILABILITY_CHECK_COUNT >= WRAPPER_MAX_FAILURES:
+            logger.critical("MLX wrapper is unavailable. Terminating LiteLLM proxy.")
+            # Signal parent process to shut down (handled by shell trap)
+            os.kill(os.getppid(), signal.SIGTERM)
+            # Also exit this process
+            sys.exit(1)
+    
+    return False
+
 def ensure_model_loaded(model_name: str) -> bool:
     """Ensure the requested model is loaded in the MLX_LM wrapper."""
+    # First check if the wrapper is available
+    if not check_wrapper_availability():
+        logger.error("MLX wrapper is unavailable, cannot load model")
+        return False
+        
     try:
         # Request model loading
+        # Make sure to pass the model name with the provider prefix intact 
+        # The wrapper will handle stripping it
         response = requests.post(
             f"{MLX_WRAPPER_URL}/load_model",
             json={"model": model_name},
@@ -106,10 +161,13 @@ def ensure_model_loaded(model_name: str) -> bool:
             logger.error(f"Failed to request model loading: {response.text}")
             return False
         
-        # Wait for the model to be ready
+        # For waiting, we don't need to worry about the provider prefix
+        # as we're just checking if the server is responsive
         return wait_for_model_ready(model_name, DYNAMIC_MODEL_PORT)
     except requests.exceptions.RequestException as e:
         logger.error(f"Error communicating with MLX wrapper: {e}")
+        # Check wrapper availability again after a communication error
+        check_wrapper_availability()
         return False
 
 def mlx_pre_call_hook(
@@ -118,6 +176,9 @@ def mlx_pre_call_hook(
 ) -> Dict[str, Any]:
     """Pre-call hook for LiteLLM to ensure the requested MLX model is loaded."""
     logger.info(f"Processing request: {request_data.get('model', 'unknown model')}")
+    
+    # No need to modify the request parameters
+    # Let LiteLLM handle streaming and parameter processing
     
     # Check if this is an autocomplete request
     if is_autocomplete_request(request_data):
@@ -141,6 +202,12 @@ def mlx_pre_call_hook(
     # Ensure the model is loaded
     if ensure_model_loaded(model_name):
         logger.info(f"Model {model_name} is loaded and ready")
+        
+        # Make sure the litellm_params have the correct model name
+        # This ensures LiteLLM uses the actual requested model, not just a pattern match
+        if "litellm_params" in request_data:
+            request_data["litellm_params"]["model"] = model_name
+            logger.info(f"Updated litellm_params.model to {model_name}")
     else:
         logger.error(f"Failed to load model {model_name}")
         # Optionally raise an exception to fail the request

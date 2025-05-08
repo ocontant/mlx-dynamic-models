@@ -12,6 +12,9 @@ PYTHON_VERSION="3.11.12"
 MLX_ENV_NAME="mlx"
 REQUIREMENTS_FILE="requirements.txt"
 
+# Trap to handle shutdown and cleanup
+trap cleanup SIGINT SIGTERM EXIT
+
 # Create a default requirements file if it doesn't exist
 if [ ! -f "$REQUIREMENTS_FILE" ]; then
   cat > $REQUIREMENTS_FILE << EOF
@@ -344,21 +347,25 @@ TMP_CONFIG=$(mktemp)
 
 cat > $TMP_CONFIG << EOF
 model_list:
-  # Route any OpenAI model to MLX
+  # Route any OpenAI model to MLX using OpenAI-compatible endpoints
   - model_name: gpt-*
     litellm_params:
       model: mlx-community/Qwen2.5-Coder-32B-Instruct-8bit
       api_base: http://localhost:${DYNAMIC_PORT}/v1
+      api_key: "not-needed"  # Local MLX server doesn't need auth, but LiteLLM requires this
       max_tokens: ${MAX_TOKENS}
       headers: {"MAX_TOKENS": "${MAX_TOKENS}"}
+      custom_llm_provider: "openai"  # Use standard OpenAI provider with custom API base
   
   # Route Anthropic models to MLX with format conversion
   - model_name: claude-*
     litellm_params:
       model: mlx-community/Qwen2.5-Coder-32B-Instruct-8bit
       api_base: http://localhost:${DYNAMIC_PORT}/v1
+      api_key: "not-needed"  # Local MLX server doesn't need auth, but LiteLLM requires this
       max_tokens: ${MAX_TOKENS}
       headers: {"MAX_TOKENS": "${MAX_TOKENS}"}
+      custom_llm_provider: "openai"
       original_api_provider: "anthropic"
       convert_to_openai: true
   
@@ -367,8 +374,10 @@ model_list:
     litellm_params:
       model: mlx-community/Qwen2.5-Coder-32B-Instruct-8bit
       api_base: http://localhost:${DYNAMIC_PORT}/v1
+      api_key: "not-needed"  # Local MLX server doesn't need auth, but LiteLLM requires this
       max_tokens: ${MAX_TOKENS}
       headers: {"MAX_TOKENS": "${MAX_TOKENS}"}
+      custom_llm_provider: "openai"
       original_api_provider: "google"
       convert_to_openai: true
   
@@ -377,34 +386,34 @@ model_list:
     litellm_params:
       model: mlx-community/Qwen2.5-Coder-32B-Instruct-8bit
       api_base: http://localhost:${DYNAMIC_PORT}/v1
+      api_key: "not-needed"  # Local MLX server doesn't need auth, but LiteLLM requires this
       max_tokens: ${MAX_TOKENS}
       headers: {"MAX_TOKENS": "${MAX_TOKENS}"}
+      custom_llm_provider: "openai"
       original_api_provider: "xai"
       convert_to_openai: true
 
-  # Support direct MLX model requests (handle any model format gracefully)
-  - model_name: */Qwen*
-    litellm_params:
-      model: mlx-community/{model_name#*/}
-      api_base: http://localhost:${DYNAMIC_PORT}/v1
-      max_tokens: ${MAX_TOKENS}
-      headers: {"MAX_TOKENS": "${MAX_TOKENS}"}
-  
-  # Direct MLX community references
+  # Direct MLX community references using fallback to ensure proper model handling
   - model_name: mlx-community/*
     litellm_params:
-      model: {model_name}
+      # The model will be extracted from the request by our pre-call hook
+      # This is just a fallback value that won't typically be used
+      model: "mlx-community/Qwen2.5-Coder-32B-Instruct-8bit"
       api_base: http://localhost:${DYNAMIC_PORT}/v1
+      api_key: "not-needed"  # Local MLX server doesn't need auth, but LiteLLM requires this
       max_tokens: ${MAX_TOKENS}
       headers: {"MAX_TOKENS": "${MAX_TOKENS}"}
+      custom_llm_provider: "openai"
   
   # Map autocomplete requests to the dedicated autocomplete model server
   - model_name: gpt-autocomplete
     litellm_params:
       model: ${AUTOCOMPLETE_MODEL}
       api_base: http://localhost:${AUTOCOMPLETE_PORT}/v1
+      api_key: "not-needed"  # Local MLX server doesn't need auth, but LiteLLM requires this
       max_tokens: 64
       headers: {"MAX_TOKENS": "64"}
+      custom_llm_provider: "openai"
 
 router_settings:
   # Use our pre-call hook to ensure the requested model is loaded
@@ -501,11 +510,37 @@ echo "This proxy routes OpenAI API calls to MLX_LM server based on the requested
 echo "All requests are processed through the pre-call hook to ensure models are loaded"
 echo "MAX_TOKENS is set to $MAX_TOKENS"
 
+# We don't need to reinstall dependencies every time
+# Just make sure the PYTHONPATH includes current directory
+
 # Start with verbose logging to see the requests and responses
 PYTHONPATH="$PWD:$PYTHONPATH" litellm --config $TMP_CONFIG --port $PORT --detailed_debug
 
-# When litellm exits, kill the wrapper
-kill $WRAPPER_PID
+# Define cleanup function to handle graceful shutdown
+cleanup() {
+  echo "Shutting down all processes..."
+  
+  # Kill the wrapper process if it exists
+  if [ -n "$WRAPPER_PID" ] && kill -0 $WRAPPER_PID 2>/dev/null; then
+    echo "Stopping MLX_LM wrapper (PID: $WRAPPER_PID)..."
+    kill -TERM $WRAPPER_PID
+    # Wait for it to terminate
+    wait $WRAPPER_PID 2>/dev/null || true
+  fi
+  
+  # Kill any remaining mlx_lm.server processes
+  echo "Checking for any remaining mlx_lm.server processes..."
+  pkill -f "mlx_lm.server" || true
+  
+  # Clean up the temporary file
+  if [ -f "$TMP_CONFIG" ]; then
+    echo "Removing temporary config file..."
+    rm $TMP_CONFIG
+  fi
+  
+  echo "Shutdown complete."
+  exit 0
+}
 
-# Clean up the temporary file
-rm $TMP_CONFIG
+# Clean exit (will trigger the cleanup trap)
+echo "LiteLLM proxy has stopped. Cleaning up..."
