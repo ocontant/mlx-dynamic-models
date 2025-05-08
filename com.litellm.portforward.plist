@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.litellm.portforward</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/pfctl</string>
+        <string>-e</string>
+        <string>-f</string>
+        <string>/etc/pf.anchors/com.litellm</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>/tmp/litellm.portforward.err</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/litellm.portforward.out</string>
+</dict>
+</plist>
