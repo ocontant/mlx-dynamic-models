@@ -2,6 +2,7 @@
 
 # Default values
 PORT=11432
+HTTPS_PORT=11433  # HTTPS port for secure connections
 MANAGEMENT_PORT=11400  # Management port
 AUTOCOMPLETE_PORT=11401  # Autocomplete port
 DYNAMIC_PORT=11402  # Dynamic port
@@ -13,6 +14,7 @@ MLX_ENV_NAME="mlx"
 REQUIREMENTS_FILE="requirements.txt"
 USE_SUDO=false  # Flag to control sudo usage for LiteLLM
 ENABLE_PORT_FORWARD=false  # Flag to enable port forwarding from 443 to LiteLLM port
+ENABLE_HTTPS=false  # Flag to enable HTTPS support
 
 # Trap to handle shutdown and cleanup
 trap cleanup SIGINT SIGTERM EXIT
@@ -281,6 +283,11 @@ while [[ $# -gt 0 ]]; do
       shift # past argument
       shift # past value
       ;;
+    --https-port)
+      HTTPS_PORT="$2"
+      shift # past argument
+      shift # past value
+      ;;
     --management-port)
       MANAGEMENT_PORT="$2"
       shift # past argument
@@ -328,11 +335,16 @@ while [[ $# -gt 0 ]]; do
       ENABLE_PORT_FORWARD=true
       shift # past argument
       ;;
+    --enable-https)
+      ENABLE_HTTPS=true
+      shift # past argument
+      ;;
     --help)
       echo "Usage: $0 [options]"
       echo ""
       echo "Options:"
-      echo "  --port PORT                    Set the LiteLLM proxy port (default: 11432)"
+      echo "  --port PORT                    Set the LiteLLM proxy HTTP port (default: 11432)"
+      echo "  --https-port PORT              Set the LiteLLM proxy HTTPS port (default: 11433)"
       echo "  --management-port PORT         Set the management API port (default: 11400)"
       echo "  --dynamic-port PORT            Set the dynamic model port (default: 11402)"
       echo "  --autocomplete-port PORT       Set the autocomplete model port (default: 11401)"
@@ -343,6 +355,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --install-dependencies         Install pyenv, Python and all required dependencies"
       echo "  --use-sudo                     Run LiteLLM proxy with sudo to bind to privileged ports"
       echo "  --enable-port-forward          Enable port forwarding from port 443 to LiteLLM port"
+      echo "  --enable-https                 Enable HTTPS support with self-signed certificates"
       echo "  --help                         Show this help message"
       exit 0
       ;;
@@ -366,6 +379,36 @@ if [[ "$USE_SUDO" == true && "$ENABLE_PORT_FORWARD" == false ]]; then
 else
   # Otherwise, don't attempt to bind to privileged ports
   ADDITIONAL_PORTS="[]  # Not binding to privileged ports"
+fi
+
+# Setup SSL certificate directories
+SSL_DIR="$(pwd)/ssl"
+SSL_CERT="${SSL_DIR}/cert.pem"
+SSL_KEY="${SSL_DIR}/key.pem"
+
+# Create SSL certificates if HTTPS is enabled
+if [[ "$ENABLE_HTTPS" == true ]]; then
+  # Create SSL directory if it doesn't exist
+  if [ ! -d "$SSL_DIR" ]; then
+    mkdir -p "$SSL_DIR"
+  fi
+  
+  # Check if certificates already exist
+  if [ ! -f "$SSL_CERT" ] || [ ! -f "$SSL_KEY" ]; then
+    echo "Generating self-signed SSL certificates for HTTPS..."
+    # Generate a self-signed certificate valid for 365 days
+    openssl req -x509 -newkey rsa:4096 -keyout "$SSL_KEY" -out "$SSL_CERT" -days 365 -nodes -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+    
+    if [ $? -ne 0 ]; then
+      echo "Failed to generate SSL certificates. Make sure openssl is installed."
+      echo "Continuing without HTTPS support."
+      ENABLE_HTTPS=false
+    else
+      echo "SSL certificates generated successfully at ${SSL_DIR}"
+    fi
+  else
+    echo "Using existing SSL certificates from ${SSL_DIR}"
+  fi
 fi
 
 cat > $TMP_CONFIG << EOF
@@ -531,7 +574,14 @@ curl -X POST "http://127.0.0.1:$MANAGEMENT_PORT/load_model" \
 
 # Function to set up port forwarding
 setup_port_forwarding() {
-  echo "Setting up port forwarding from port 443 to $PORT..."
+  # Determine target port based on protocol
+  local TARGET_PORT=$PORT
+  if [[ "$ENABLE_HTTPS" == true ]]; then
+    echo "Setting up port forwarding from port 443 to HTTPS port $HTTPS_PORT..."
+    TARGET_PORT=$HTTPS_PORT
+  else
+    echo "Setting up port forwarding from port 443 to HTTP port $PORT..."
+  fi
   
   # Check if sudo is available and we have permissions
   if ! command -v sudo &> /dev/null; then
@@ -553,7 +603,7 @@ setup_port_forwarding() {
   
   # Create a temporary pfctl rules file
   local PF_RULES_FILE=$(mktemp)
-  echo "rdr pass on lo0 inet proto tcp from any to any port 443 -> 127.0.0.1 port $PORT" > $PF_RULES_FILE
+  echo "rdr pass on lo0 inet proto tcp from any to any port 443 -> 127.0.0.1 port $TARGET_PORT" > $PF_RULES_FILE
   
   # Enable pfctl if not already enabled
   sudo pfctl -e 2>/dev/null || true
@@ -562,19 +612,19 @@ setup_port_forwarding() {
   sudo pfctl -f $PF_RULES_FILE
   
   # Check if port forwarding was set up successfully
-  if sudo pfctl -s nat | grep -q "port 443 -> 127.0.0.1 port $PORT"; then
-    echo "Port forwarding successfully set up: 443 -> $PORT"
+  if sudo pfctl -s nat | grep -q "port 443 -> 127.0.0.1 port $TARGET_PORT"; then
+    echo "Port forwarding successfully set up: 443 -> $TARGET_PORT"
     rm $PF_RULES_FILE
     return 0
   else
     # Try an alternative approach for macOS
     echo "Standard method failed. Trying alternative approach for macOS..."
-    echo "rdr pass inet proto tcp from any to any port 443 -> 127.0.0.1 port $PORT" > $PF_RULES_FILE
+    echo "rdr pass inet proto tcp from any to any port 443 -> 127.0.0.1 port $TARGET_PORT" > $PF_RULES_FILE
     sudo pfctl -f $PF_RULES_FILE
     
     # Check again if it worked
-    if sudo pfctl -s nat | grep -q "port 443 -> 127.0.0.1 port $PORT"; then
-      echo "Port forwarding successfully set up: 443 -> $PORT"
+    if sudo pfctl -s nat | grep -q "port 443 -> 127.0.0.1 port $TARGET_PORT"; then
+      echo "Port forwarding successfully set up: 443 -> $TARGET_PORT"
       rm $PF_RULES_FILE
       return 0
     else
@@ -595,8 +645,15 @@ fi
 
 # Start the LiteLLM proxy server
 echo "Starting LiteLLM proxy server on port $PORT"
+if [[ "$ENABLE_HTTPS" == true ]]; then
+  echo "With HTTPS enabled on port $HTTPS_PORT"
+fi
 if [[ "$ENABLE_PORT_FORWARD" == true && $? -eq 0 ]]; then
-  echo "With port forwarding from 443 -> $PORT"
+  if [[ "$ENABLE_HTTPS" == true ]]; then
+    echo "With port forwarding from 443 -> $HTTPS_PORT (HTTPS)"
+  else
+    echo "With port forwarding from 443 -> $PORT (HTTP)"
+  fi
 fi
 echo "This proxy routes OpenAI API calls to MLX_LM server based on the requested model"
 echo "All requests are processed through the pre-call hook to ensure models are loaded"
@@ -605,12 +662,20 @@ echo "MAX_TOKENS is set to $MAX_TOKENS"
 # We don't need to reinstall dependencies every time
 # Just make sure the PYTHONPATH includes current directory
 
+# Build the command with appropriate options
+LITELLM_CMD="litellm --config $TMP_CONFIG --port $PORT --detailed_debug"
+
+# Add HTTPS options if enabled
+if [[ "$ENABLE_HTTPS" == true ]]; then
+  LITELLM_CMD="$LITELLM_CMD --ssl_keyfile $SSL_KEY --ssl_certfile $SSL_CERT --ssl_port $HTTPS_PORT"
+fi
+
 # Start with verbose logging to see the requests and responses
 if [[ "$USE_SUDO" == true ]]; then
   echo "Running LiteLLM with sudo to bind to privileged ports..."
-  sudo PYTHONPATH="$PWD:$PYTHONPATH" litellm --config $TMP_CONFIG --port $PORT --detailed_debug
+  sudo PYTHONPATH="$PWD:$PYTHONPATH" $LITELLM_CMD
 else
-  PYTHONPATH="$PWD:$PYTHONPATH" litellm --config $TMP_CONFIG --port $PORT --detailed_debug
+  PYTHONPATH="$PWD:$PYTHONPATH" $LITELLM_CMD
 fi
 
 # Define cleanup function to handle graceful shutdown

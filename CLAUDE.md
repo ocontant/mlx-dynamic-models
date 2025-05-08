@@ -27,12 +27,23 @@ The proxy handles format conversion and configuration automatically, allowing ap
 
 #### Dynamic MLX Proxy (supports model switching):
 ```bash
-./start_dynamic_mlx_proxy.sh [--port PORT] [--max-tokens MAX_TOKENS] [--autocomplete-model MODEL] [--default-model MODEL] [--enable-port-forward] [--use-sudo]
+./start_dynamic_mlx_proxy.sh [--port PORT] [--https-port HTTPS_PORT] [--max-tokens MAX_TOKENS] [--autocomplete-model MODEL] [--default-model MODEL] [--enable-port-forward] [--use-sudo] [--enable-https]
 ```
 
 Additional parameters:
-- `--enable-port-forward`: Set up port forwarding from port 443 to the LiteLLM port using macOS pfctl
+- `--port PORT`: HTTP port for LiteLLM proxy (default: 11432)
+- `--https-port PORT`: HTTPS port for LiteLLM proxy (default: 11433)
+- `--enable-port-forward`: Set up port forwarding from port 443 to LiteLLM port using macOS pfctl
 - `--use-sudo`: Run LiteLLM proxy with sudo to allow binding directly to privileged ports
+- `--enable-https`: Enable HTTPS support with self-signed certificates
+
+#### Using HTTPS:
+The `--enable-https` option automatically:
+1. Generates self-signed SSL certificates if they don't exist (stored in ./ssl/)
+2. Configures LiteLLM to use both HTTP and HTTPS ports
+3. When combined with `--enable-port-forward`, forwards external port 443 to the HTTPS port
+
+For production use, you can replace the auto-generated self-signed certificates with your own trusted certificates by placing them in the ./ssl/ directory as cert.pem and key.pem.
 
 #### Direct Host Method (Anthropic to Qwen):
 ```bash
