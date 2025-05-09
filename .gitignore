@@ -1,4 +1,6 @@
-
+ssl/
 
 #Ignore vscode AI rules
 .github/copilot-instructions.md
+
+**/.claude/settings.local.json
