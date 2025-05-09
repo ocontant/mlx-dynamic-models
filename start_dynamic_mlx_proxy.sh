@@ -498,12 +498,17 @@ fi
 # Generate dynamic config file with proper variable substitution
 TMP_CONFIG=$(mktemp)
 
-# Set appropriate additional ports based on parameters
+# Set appropriate ports based on whether we're using sudo
 if (( USE_SUDO_BOOL )); then
   # If using sudo, bind directly to privileged ports
-  ADDITIONAL_PORTS="[80, 443]  # Binding directly to privileged ports with sudo"
+  HTTP_BIND_PORT=80
+  HTTPS_BIND_PORT=443
+  ADDITIONAL_PORTS="[]  # Not using additional_ports as we're binding directly"
+  echo "Using sudo to bind directly to privileged ports: HTTP=80, HTTPS=443"
 else
-  # Otherwise, don't attempt to bind to privileged ports
+  # Otherwise, use the regular high ports
+  HTTP_BIND_PORT=$PORT
+  HTTPS_BIND_PORT=$HTTPS_PORT
   ADDITIONAL_PORTS="[]  # Not binding to privileged ports"
 fi
 
@@ -909,10 +914,22 @@ start_litellm() {
   
   # Print the command for debugging
   echo "Starting $instance_name LiteLLM instance on port $port"
-  echo "Command: litellm ${args[*]}"
   
-  # Start LiteLLM in background
-  PYTHONPATH="$PWD:$PYTHONPATH" litellm "${args[@]}" &
+  # Determine if we need sudo (for privileged ports)
+  local needs_sudo=0
+  if (( USE_SUDO_BOOL )) && (( port < 1024 )); then
+    needs_sudo=1
+    echo "Command: sudo litellm ${args[*]} (using sudo for privileged port)"
+  else
+    echo "Command: litellm ${args[*]}"
+  fi
+  
+  # Start LiteLLM in background with or without sudo as needed
+  if (( needs_sudo )); then
+    sudo PYTHONPATH="$PWD:$PYTHONPATH" litellm "${args[@]}" &
+  else
+    PYTHONPATH="$PWD:$PYTHONPATH" litellm "${args[@]}" &
+  fi
   
   # Store the PID
   local pid=$!
@@ -951,10 +968,12 @@ line_up
 echo "Starting HTTP Instance"
 if (( ENABLE_PORT_FORWARD_BOOL )); then
   echo "With port forwarding from 80 -> $PORT (HTTP)"
+elif (( USE_SUDO_BOOL )); then
+  echo "Binding directly to privileged port 80 (HTTP) using sudo"
 fi
 
 # Start HTTP instance
-start_litellm "HTTP" "$TMP_CONFIG" "$PORT"
+start_litellm "HTTP" "$TMP_CONFIG" "$HTTP_BIND_PORT"
 if [ $? -ne 0 ]; then
   line_error_up
   echo "ERROR: Failed to start HTTP instance. Exiting."
@@ -967,10 +986,13 @@ if (( ENABLE_HTTPS_BOOL )); then
   echo "Starting HTTPS Instance"
   if (( ENABLE_PORT_FORWARD_BOOL )); then
     echo "With port forwarding from 443 -> $HTTPS_PORT (HTTPS-enabled)"
+  elif (( USE_SUDO_BOOL )); then
+    echo "Binding directly to privileged port 443 (HTTPS) using sudo"
   fi
   
   # Start HTTPS server with SSL certificates
-  start_litellm "HTTPS" "$TMP_CONFIG" "$HTTPS_PORT" "--ssl_keyfile_path" "$SSL_KEY" "--ssl_certfile_path" "$SSL_CERT"
+  start_litellm "HTTPS" "$TMP_CONFIG" "$HTTPS_BIND_PORT" "--ssl_keyfile_path" "$SSL_KEY" "--ssl_certfile_path" "$SSL_CERT"
+  fi
   if [ $? -ne 0 ]; then
     line_error_up
     echo "ERROR: Failed to start HTTPS instance."
