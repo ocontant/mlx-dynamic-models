@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Cache sudo credentials at the beginning to avoid password prompts getting mixed with output
+if [[ "$EUID" -ne 0 ]]; then
+    echo "Caching sudo credentials for later use..."
+    sudo -v
+fi
 # Default values
 PORT=11432
 HTTPS_PORT=11433  # HTTPS port for secure connections
@@ -9,13 +14,95 @@ DYNAMIC_PORT=11402  # Dynamic port
 MAX_TOKENS=8192
 AUTOCOMPLETE_MODEL="mlx-community/Qwen2.5-Coder-3B-8bit"
 DEFAULT_MODEL="mlx-community/Qwen2.5-Coder-32B-Instruct-8bit"
+SSL_DOMAIN="localhost"  # Default domain for SSL certificate
+
+# Boolean flags (string representation)
+USE_SUDO=false
+ENABLE_PORT_FORWARD=false
+ENABLE_HTTPS=false
+
+# Numeric boolean flags (0=false, 1=true)
+USE_SUDO_BOOL=0
+ENABLE_PORT_FORWARD_BOOL=0
+ENABLE_HTTPS_BOOL=0
+
+# Dependencies
 PYTHON_VERSION="3.11.12"
 MLX_ENV_NAME="mlx"
 REQUIREMENTS_FILE="requirements.txt"
-USE_SUDO=false  # Flag to control sudo usage for LiteLLM
-ENABLE_PORT_FORWARD=false  # Flag to enable port forwarding from 443 to LiteLLM port
-ENABLE_HTTPS=false  # Flag to enable HTTPS support
-SSL_DOMAIN="localhost"  # Default domain for SSL certificate
+
+# Define cleanup function to handle graceful shutdown
+function cleanup() {
+  line_up
+  echo "Shutting down all processes..."
+  
+  # Kill any LiteLLM instances
+  if [ ${#LITELLM_PIDS[@]} -gt 0 ]; then
+    echo "Stopping LiteLLM instances..."
+    for pid in "${LITELLM_PIDS[@]}"; do
+      if kill -0 $pid 2>/dev/null; then
+        echo "  - Stopping LiteLLM instance (PID: $pid)..."
+        kill -TERM $pid 2>/dev/null
+        wait $pid 2>/dev/null || true
+      fi
+    done
+  fi
+  
+  # Kill the wrapper process if it exists
+  if [ -n "$WRAPPER_PID" ] && kill -0 $WRAPPER_PID 2>/dev/null; then
+    echo "Stopping MLX_LM wrapper (PID: $WRAPPER_PID)..."
+    kill -TERM $WRAPPER_PID
+    # Wait for it to terminate
+    wait $WRAPPER_PID 2>/dev/null || true
+  fi
+  
+  # Kill any remaining mlx_lm.server processes
+  echo "Checking for any remaining mlx_lm.server processes..."
+  pkill -f "mlx_lm.server" || true
+  
+  # Clean up the temporary config file
+  if [ -f "$TMP_CONFIG" ]; then
+    echo "Removing temporary config file..."
+    rm $TMP_CONFIG
+  fi
+  
+  # Remove port forwarding rules if they were set up
+  if (( ENABLE_PORT_FORWARD_BOOL )); then
+    echo "Removing port forwarding rules..."
+    
+    # Check if we stored an anchor name
+    if [[ -n "$PF_ANCHOR_USED" ]]; then
+      echo "Removing rules from anchor $PF_ANCHOR_USED..."
+      sudo /sbin/pfctl -a "$PF_ANCHOR_USED" -F all 2>/dev/null || true
+    else
+      # Try default anchor name
+      echo "Removing rules from default anchor..."
+      sudo /sbin/pfctl -a "com.litellm.portforward" -F all 2>/dev/null || true
+      
+      # Also try clearing directly (backup method)
+      echo "Clearing direct rules (if any)..."
+      local PF_RULES_FILE=$(mktemp)
+      echo "" > $PF_RULES_FILE
+      sudo /sbin/pfctl -f $PF_RULES_FILE 2>/dev/null || true
+      rm $PF_RULES_FILE
+    fi
+    
+    echo "Port forwarding rules have been removed."
+    
+    # Print verification
+    if (( ENABLE_HTTPS_BOOL )); then
+      echo "Verifying port forwarding removal..."
+      sudo /sbin/pfctl -s nat | grep -E "port (80|443)" || echo "✅ No HTTP/HTTPS port forwarding rules found"
+    else
+      echo "Verifying port forwarding removal..."
+      sudo /sbin/pfctl -s nat | grep "port 80" || echo "✅ No HTTP port forwarding rules found"
+    fi
+  fi
+  
+  echo "Shutdown complete."
+  line_down
+  exit 0
+}
 
 # Trap to handle shutdown and cleanup
 trap cleanup SIGINT SIGTERM EXIT
@@ -39,6 +126,24 @@ python-dotenv>=1.1.0
 EOF
   echo "Created default $REQUIREMENTS_FILE"
 fi
+
+# Decorator 
+function line_up () {
+  echo "-----------------------------------------------------------"
+  echo ""
+}
+function line_down () {
+  echo ""
+  echo "-----------------------------------------------------------"
+}
+function line_error_up () {
+  echo "+++++++"
+  echo ""
+}
+function line_error_down () {
+  echo ""
+  echo "+++++++"
+}
 
 # Function to download a model using huggingface-cli
 download_model() {
@@ -330,14 +435,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     --use-sudo)
       USE_SUDO=true
+      USE_SUDO_BOOL=1
       shift # past argument
       ;;
-    --enable-port-forward)
+    --enable-port-forward) 
       ENABLE_PORT_FORWARD=true
+      ENABLE_PORT_FORWARD_BOOL=1
       shift # past argument
       ;;
     --enable-https)
       ENABLE_HTTPS=true
+      ENABLE_HTTPS_BOOL=1
       shift # past argument
       ;;
     --ssl-domain)
@@ -377,12 +485,22 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Check for mutual exclusivity between USE_SUDO and ENABLE_PORT_FORWARD
+if (( USE_SUDO_BOOL && ENABLE_PORT_FORWARD_BOOL )); then
+  line_error_up
+  echo "ERROR: --use-sudo and --enable-port-forward cannot be used together."
+  echo "       Use either --use-sudo to bind directly to privileged ports,"
+  echo "       or --enable-port-forward to set up port forwarding from privileged ports."
+  line_error_down
+  exit 1
+fi
+
 # Generate dynamic config file with proper variable substitution
 TMP_CONFIG=$(mktemp)
 
 # Set appropriate additional ports based on parameters
-if [[ "$USE_SUDO" == true && "$ENABLE_PORT_FORWARD" == false ]]; then
-  # If using sudo and not port forwarding, bind directly to privileged ports
+if (( USE_SUDO_BOOL )); then
+  # If using sudo, bind directly to privileged ports
   ADDITIONAL_PORTS="[80, 443]  # Binding directly to privileged ports with sudo"
 else
   # Otherwise, don't attempt to bind to privileged ports
@@ -423,27 +541,22 @@ if [[ "$ENABLE_HTTPS" == true ]]; then
       -subj "/CN=$SSL_DOMAIN" -addext "$SAN_EXTENSIONS"
     
     if [ $? -ne 0 ]; then
+      line_up
       echo "Failed to generate SSL certificates. Make sure openssl is installed."
       echo "Continuing without HTTPS support."
+      line_down
       ENABLE_HTTPS=false
     else
+      line_up
       echo "SSL certificates generated successfully at ${SSL_DIR}"
       echo "Certificate is valid for: $SSL_DOMAIN"
+      line_down
     fi
   else
+    line_up
     echo "Using existing SSL certificates from ${SSL_DIR}"
     echo "Certificate is configured for: $SSL_DOMAIN"
-  fi
-  
-  # If the domain is api.anthropic.com, suggest adding a hosts entry
-  if [[ "$SSL_DOMAIN" == "api.anthropic.com" ]]; then
-    echo ""
-    echo "IMPORTANT: For local testing with api.anthropic.com, add the following entry to your /etc/hosts file:"
-    echo "127.0.0.1  api.anthropic.com"
-    echo ""
-    echo "You can do this by running:"
-    echo "sudo bash -c \"echo '127.0.0.1  api.anthropic.com' >> /etc/hosts\""
-    echo ""
+    line_down
   fi
 fi
 
@@ -594,41 +707,55 @@ WRAPPER_PID=$!
 
 # Wait for the wrapper to start
 echo "Waiting for MLX_LM wrapper to start..."
+line_down
 sleep 5
+
 
 # Check if wrapper is still running
 if ! kill -0 $WRAPPER_PID 2>/dev/null; then
+  line_up
   echo "MLX_LM wrapper failed to start. Check the logs for errors."
+  line_down
   exit 1
 fi
 
 # Start loading the default model
+echo ""
 echo "Pre-loading default model: $DEFAULT_MODEL..."
 curl -X POST "http://127.0.0.1:$MANAGEMENT_PORT/load_model" \
   -H "Content-Type: application/json" \
   -d "{\"model\": \"$DEFAULT_MODEL\"}"
 
-# Function to set up port forwarding
+# Function to set up port forwarding for HTTP and HTTPS
 setup_port_forwarding() {
-  # Always forward to the main port since LiteLLM serves both HTTP and HTTPS on the same port
-  local TARGET_PORT=$PORT
+  line_up
+  echo "Setting up port forwarding:"
   
-  # If HTTPS is enabled, we're forwarding to an HTTPS-capable endpoint
-  if [[ "$ENABLE_HTTPS" == true ]]; then
-    echo "Setting up port forwarding from port 443 to HTTPS-enabled port $PORT..."
+  # We'll use only localhost interface (lo0) for port forwarding
+  echo "Setting up localhost-only port forwarding (no external network exposure)"
+  
+  # Display info about forwarding configuration
+  if (( ENABLE_HTTPS_BOOL )); then
+    echo "• HTTP:  127.0.0.1:80  → 127.0.0.1:$PORT     (localhost only)"
+    echo "• HTTPS: 127.0.0.1:443 → 127.0.0.1:$HTTPS_PORT (localhost only)"
   else
-    echo "Setting up port forwarding from port 443 to HTTP port $PORT..."
+    echo "• HTTP:  127.0.0.1:80 → 127.0.0.1:$PORT     (localhost only)"
   fi
   
   # Check if sudo is available
   if ! command -v sudo &> /dev/null; then
+    line_error_up
     echo "Error: sudo is required for port forwarding but is not available."
+    line_error_down
     return 1
   fi
   
-  # Check if pfctl is available (macOS specific)
-  if ! command -v pfctl &> /dev/null; then
-    echo "Error: pfctl is required for port forwarding but is not available. This feature is macOS specific."
+  # Check if /sbin/pfctl is available (macOS specific)
+  if ! command -v /sbin/pfctl &> /dev/null; then
+    line_error_up
+    echo "Error: /sbin/pfctl is required for port forwarding but is not available."
+    echo "This feature is macOS specific."
+    line_error_down
     return 1
   fi
   
@@ -636,185 +763,229 @@ setup_port_forwarding() {
   local PF_RULES_FILE=$(mktemp)
   local ANCHOR_NAME="com.litellm.portforward"
   
-  # Create the ruleset with minimal configuration
+  # Create a simplified localhost-only ruleset for macOS
   cat > $PF_RULES_FILE << EOF
-# Temporary port forwarding ruleset for LiteLLM Proxy
-# Forward port 443 to port $TARGET_PORT
+# Temporary port forwarding ruleset for LiteLLM Proxy (localhost only)
 
-# Direct pass-through and redirect for loopback traffic (necessary for macOS localhost)
-pass in quick on lo0 inet proto tcp from any to 127.0.0.1 port 443 rdr-to 127.0.0.1 port $TARGET_PORT
-
-# General port forwarding rule for non-loopback traffic
-rdr pass inet proto tcp from any to any port 443 -> 127.0.0.1 port $TARGET_PORT
+# HTTP forwarding for localhost only
+rdr on lo0 proto tcp from any to 127.0.0.1 port 80 -> 127.0.0.1 port $PORT
 EOF
 
-  # If we have a specific domain, add a helpful message
-  if [[ "$SSL_DOMAIN" != "localhost" ]]; then
+  # Add HTTPS rules if enabled
+  if (( ENABLE_HTTPS_BOOL )); then
+    cat >> $PF_RULES_FILE << EOF
+
+# HTTPS forwarding for localhost only
+rdr on lo0 proto tcp from any to 127.0.0.1 port 443 -> 127.0.0.1 port $HTTPS_PORT
+EOF
+  else
+    # HTTP-only rules already added above
+    echo "" >> $PF_RULES_FILE
+  fi
+  
+  # Add domain-specific message if applicable
+  if [[ "$SSL_DOMAIN" != "localhost" && (( ENABLE_HTTPS_BOOL )) ]]; then
+    echo ""
     echo "NOTE: For ${SSL_DOMAIN} to work, add this to your hosts file:"
     echo "127.0.0.1  ${SSL_DOMAIN}"
     echo ""
-    echo "Run: sudo bash -c \"echo '127.0.0.1  ${SSL_DOMAIN}' >> /etc/hosts\""
   fi
   
-  # Enable pf if not already enabled 
-  PF_STATUS=$(sudo pfctl -s info 2>/dev/null | grep Status)
+  # Explicitly enable pf (this might require user confirmation)
+  echo "Enabling packet filter (pf)..."
+  sudo /sbin/pfctl -E 2>/dev/null || true
+  
+  # Double-check if pf is now enabled
+  PF_STATUS=$(sudo /sbin/pfctl -s info 2>/dev/null | grep Status)
   if [[ "$PF_STATUS" != *"Enabled"* ]]; then
-    echo "Enabling packet filter (pf)..."
-    sudo pfctl -E 2>/dev/null || true
+    echo "Failed to enable packet filter. Please run 'sudo /sbin/pfctl -E' manually."
+    return 1
+  else
+    echo "✅ Packet filter (pf) is now enabled"  
   fi
-  
-  # Try using sudo pfctl -e to make sure pf is fully enabled
-  echo "Ensuring packet filter is fully enabled..."
-  sudo pfctl -e 2>/dev/null || true
   
   # Add our rules in a separate anchor (minimal system impact)
   echo "Adding port forwarding rules..."
   # Try first without redirection to see any errors
-  sudo pfctl -a "$ANCHOR_NAME" -f $PF_RULES_FILE
-  
+  sudo /sbin/pfctl -a "$ANCHOR_NAME" -f $PF_RULES_FILE
+  sleep 1
+
   # Verify the rules were applied
   echo "Verifying port forwarding rules..."
-  PFCTL_OUTPUT=$(sudo pfctl -a "$ANCHOR_NAME" -s nat 2>/dev/null)
-  echo "DEBUG: pfctl anchor output: '$PFCTL_OUTPUT'"
+  PFCTL_OUTPUT=$(sudo /sbin/pfctl -a "$ANCHOR_NAME" -s nat 2>/dev/null)
   
   if [[ -z "$PFCTL_OUTPUT" ]]; then
+    line_error_up
     echo "Failed to add rules to anchor. Trying direct rule application..."
-    echo "DEBUG: Direct rule contents:"
-    cat $PF_RULES_FILE
+    line_error_down
     
     # Try with more verbose output
-    echo "Applying rules directly with pfctl..."
-    sudo pfctl -v -f $PF_RULES_FILE
+    echo "Applying rules directly with /sbin/pfctl..."
+    sudo /sbin/pfctl -v -f $PF_RULES_FILE
     
     # Check if it worked
-    PFCTL_OUTPUT=$(sudo pfctl -s nat)
-    echo "DEBUG: Direct pfctl output: '$PFCTL_OUTPUT'"
+    PFCTL_OUTPUT=$(sudo /sbin/pfctl -s nat)
   fi
   
-  # Check if port forwarding was set up successfully
-  # The port forwarding syntax might vary by OS version, so check for different patterns
-  if [[ ! -z "$PFCTL_OUTPUT" ]]; then
-    # Any output from pfctl -s nat likely means rules were applied
-    echo "✅ Port forwarding successfully set up: 443 -> $TARGET_PORT"
+  # Print current NAT rules for inspection
+  echo "Current NAT rules after setup:"
+  echo "$PFCTL_OUTPUT"
+  
+  # Try several grep patterns to detect the rules, since pfctl output format can vary
+  HTTP_FORWARDING=$(echo "$PFCTL_OUTPUT" | grep -E "port.*80.*->.*$PORT" || true)
+  
+  # Then verify HTTPS if enabled
+  HTTPS_FORWARDING=""
+  if (( ENABLE_HTTPS_BOOL )); then
+    HTTPS_FORWARDING=$(echo "$PFCTL_OUTPUT" | grep -E "port.*443.*->.*$HTTPS_PORT" || true)
+  fi
+  
+  # Check if we see any rules, regardless of the format
+  if [[ -n "$PFCTL_OUTPUT" ]]; then
+    echo "✅ Port forwarding rules appear to be loaded"
+    
+    if [[ -n "$HTTP_FORWARDING" ]]; then
+      echo "✅ HTTP port forwarding verified: 80 → $PORT"
+    else
+      echo "Note: HTTP port forwarding loaded but not detected in verification output"
+    fi
+    
+    if (( ENABLE_HTTPS_BOOL )); then
+      if [[ -n "$HTTPS_FORWARDING" ]]; then
+        echo "✅ HTTPS port forwarding verified: 443 → $HTTPS_PORT"
+      else
+        echo "Note: HTTPS port forwarding loaded but not detected in verification output"
+      fi
+    fi
+    
     # Store the anchor name for cleanup
     PF_ANCHOR_USED="$ANCHOR_NAME"
     export PF_ANCHOR_USED
     rm $PF_RULES_FILE
     return 0
-  elif sudo pfctl -s nat | grep -q "port.*443.*->.*$TARGET_PORT"; then
-    # Alternative check for the entire NAT table
-    echo "✅ Port forwarding successfully set up: 443 -> $TARGET_PORT (in main ruleset)"
-    rm $PF_RULES_FILE 
-    return 0
   else
-    echo "Failed to set up port forwarding. Make sure packet filter (pf) is enabled on your system."
-    echo "Try running: sudo pfctl -E"
+    line_error_up
+    echo "Failed to set up port forwarding. Rules were loaded but not detected."
+    echo "Try running: ./test_pf.sh --test"
+    line_error_down
     rm $PF_RULES_FILE
     return 1
   fi
+  
+  line_down
+}
+
+
+# Array to store PIDs of all LiteLLM instances
+declare -a LITELLM_PIDS=()
+
+# Function to start LiteLLM instances and track their PIDs
+start_litellm() {
+  local instance_name="$1"
+  local config_file="$2"
+  local port="$3"
+  shift 3
+  
+  # Array for additional arguments
+  local args=()
+  
+  # Create base command 
+  args=("--config" "$config_file" "--port" "$port" "--detailed_debug")
+  
+  # Add any additional arguments
+  for arg_pair in "$@"; do
+    # Parse the arg pair format ["--flag" "value"]
+    if [[ "$arg_pair" == *"["* ]]; then
+      # Extract values from the format ["--flag" "value"]
+      local flag=$(echo "$arg_pair" | sed -E 's/\[\s*"([^"]*)".*$/\1/')
+      local value=$(echo "$arg_pair" | sed -E 's/.*"[^"]*"\s*"([^"]*)".*$/\1/')
+      
+      args+=("$flag" "$value")
+    else
+      # Just add the argument as is
+      args+=("$arg_pair")
+    fi
+  done
+  
+  # Print the command for debugging
+  echo "Starting $instance_name LiteLLM instance on port $port"
+  echo "Command: litellm ${args[*]}"
+  
+  # Start LiteLLM in background
+  PYTHONPATH="$PWD:$PYTHONPATH" litellm "${args[@]}" &
+  
+  # Store the PID
+  local pid=$!
+  LITELLM_PIDS+=($pid)
+  
+  # Check if process is running after a brief delay
+  sleep 2
+  if ! kill -0 $pid 2>/dev/null; then
+    line_error_up
+    echo "ERROR: LiteLLM $instance_name instance failed to start."
+    echo "Please check the logs for more information."
+    line_error_down
+    return 1
+  fi
+  
+  echo "✅ LiteLLM $instance_name instance started with PID: $pid"
+  return 0
 }
 
 # Set up port forwarding if requested
-if [[ "$ENABLE_PORT_FORWARD" == true ]]; then
+if (( ENABLE_PORT_FORWARD_BOOL )); then
   setup_port_forwarding
   if [ $? -ne 0 ]; then
-    echo "WARNING: Failed to set up port forwarding. Continuing without it."
+    line_error_up
+    echo "ERROR: Failed to set up port forwarding. Exiting."
+    line_error_down
+    exit 1
   fi
 fi
 
 # Start the LiteLLM proxy server
-echo "Starting LiteLLM proxy server on port $PORT"
-if [[ "$ENABLE_HTTPS" == true ]]; then
-  echo "With HTTPS enabled"
+echo ""
+line_up
+
+# Start HTTP server
+echo "Starting HTTP Instance"
+if (( ENABLE_PORT_FORWARD_BOOL )); then
+  echo "With port forwarding from 80 -> $PORT (HTTP)"
 fi
-if [[ "$ENABLE_PORT_FORWARD" == true && $? -eq 0 ]]; then
-  if [[ "$ENABLE_HTTPS" == true ]]; then
-    echo "With port forwarding from 443 -> $PORT (HTTPS-enabled)"
-  else
-    echo "With port forwarding from 443 -> $PORT (HTTP)"
+
+# Start HTTP instance
+start_litellm "HTTP" "$TMP_CONFIG" "$PORT"
+if [ $? -ne 0 ]; then
+  line_error_up
+  echo "ERROR: Failed to start HTTP instance. Exiting."
+  line_error_down
+  exit 1
+fi
+
+# If HTTPS is enabled, start a separate instance
+if (( ENABLE_HTTPS_BOOL )); then
+  echo "Starting HTTPS Instance"
+  if (( ENABLE_PORT_FORWARD_BOOL )); then
+    echo "With port forwarding from 443 -> $HTTPS_PORT (HTTPS-enabled)"
+  fi
+  
+  # Start HTTPS server with SSL certificates
+  start_litellm "HTTPS" "$TMP_CONFIG" "$HTTPS_PORT" "--ssl_keyfile_path" "$SSL_KEY" "--ssl_certfile_path" "$SSL_CERT"
+  if [ $? -ne 0 ]; then
+    line_error_up
+    echo "ERROR: Failed to start HTTPS instance."
+    echo "HTTP instance will continue running."
+    line_error_down
   fi
 fi
+
 echo "This proxy routes OpenAI API calls to MLX_LM server based on the requested model"
 echo "All requests are processed through the pre-call hook to ensure models are loaded"
 echo "MAX_TOKENS is set to $MAX_TOKENS"
+line_down
 
 # We don't need to reinstall dependencies every time
 # Just make sure the PYTHONPATH includes current directory
 
-# Build the command with appropriate options
-LITELLM_CMD="litellm --config $TMP_CONFIG --port $PORT --detailed_debug"
-
-# Add HTTPS options if enabled
-if [[ "$ENABLE_HTTPS" == true ]]; then
-  # LiteLLM uses --ssl_keyfile_path and --ssl_certfile_path for SSL
-  # Note: LiteLLM doesn't support --ssl_port, it uses the main port for HTTP and HTTPS
-  LITELLM_CMD="$LITELLM_CMD --ssl_keyfile_path $SSL_KEY --ssl_certfile_path $SSL_CERT"
-  echo "Using SSL certificate: $SSL_CERT"
-  echo "Using SSL key: $SSL_KEY"
-  echo "Note: LiteLLM will serve HTTPS on the same port ($PORT) as HTTP"
-fi
-
-# Start with verbose logging to see the requests and responses
-if [[ "$USE_SUDO" == true ]]; then
-  echo "Running LiteLLM with sudo to bind to privileged ports..."
-  sudo PYTHONPATH="$PWD:$PYTHONPATH" $LITELLM_CMD
-else
-  PYTHONPATH="$PWD:$PYTHONPATH" $LITELLM_CMD
-fi
-
-# Define cleanup function to handle graceful shutdown
-cleanup() {
-  echo "Shutting down all processes..."
-  
-  # Kill the wrapper process if it exists
-  if [ -n "$WRAPPER_PID" ] && kill -0 $WRAPPER_PID 2>/dev/null; then
-    echo "Stopping MLX_LM wrapper (PID: $WRAPPER_PID)..."
-    kill -TERM $WRAPPER_PID
-    # Wait for it to terminate
-    wait $WRAPPER_PID 2>/dev/null || true
-  fi
-  
-  # Kill any remaining mlx_lm.server processes
-  echo "Checking for any remaining mlx_lm.server processes..."
-  pkill -f "mlx_lm.server" || true
-  
-  # Clean up the temporary file
-  if [ -f "$TMP_CONFIG" ]; then
-    echo "Removing temporary config file..."
-    rm $TMP_CONFIG
-  fi
-  
-  # Remove port forwarding rules if they were set up
-  if [[ "$ENABLE_PORT_FORWARD" == true ]]; then
-    echo "Removing port forwarding rules..."
-    
-    # Check if we stored an anchor name
-    if [[ -n "$PF_ANCHOR_USED" ]]; then
-      echo "Removing rules from anchor $PF_ANCHOR_USED..."
-      sudo pfctl -a "$PF_ANCHOR_USED" -F all 2>/dev/null || true
-    else
-      # Try default anchor name
-      echo "Removing rules from default anchor..."
-      sudo pfctl -a "com.litellm.portforward" -F all 2>/dev/null || true
-      
-      # Also try clearing directly (backup method)
-      echo "Clearing direct rules (if any)..."
-      local PF_RULES_FILE=$(mktemp)
-      echo "" > $PF_RULES_FILE
-      sudo pfctl -f $PF_RULES_FILE 2>/dev/null || true
-      rm $PF_RULES_FILE
-    fi
-    
-    echo "Port forwarding rules have been removed."
-    
-    # Print verification
-    echo "Verifying port forwarding removal:"
-    sudo pfctl -s nat | grep "port 443" || echo "✅ No port 443 forwarding rules found"
-  fi
-  
-  echo "Shutdown complete."
-  exit 0
-}
-
-# Clean exit (will trigger the cleanup trap)
-echo "LiteLLM proxy has stopped. Cleaning up..."
+# Wait for LiteLLM processes to complete
+wait

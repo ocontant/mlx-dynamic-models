@@ -40,8 +40,8 @@ Additional parameters:
 #### Using HTTPS:
 The `--enable-https` option automatically:
 1. Generates self-signed SSL certificates if they don't exist (stored in ./ssl/)
-2. Configures LiteLLM to use both HTTP and HTTPS ports
-3. When combined with `--enable-port-forward`, forwards external port 443 to the HTTPS port
+2. Starts separate HTTP and HTTPS LiteLLM instances on their respective ports
+3. When combined with `--enable-port-forward`, sets up localhost port forwarding from port 443 to the HTTPS port
 
 You can also specify a custom domain for the SSL certificate:
 ```bash
@@ -72,6 +72,14 @@ For production use, you can replace the auto-generated self-signed certificates 
 
 - For localhost: cert.pem and key.pem
 - For custom domains: cert_domainname.pem and key_domainname.pem (where "domainname" is the domain with dots and colons removed)
+
+#### Port Forwarding Features
+
+- Port forwarding uses macOS packet filter (pf) to redirect localhost traffic from privileged ports (80/443) to the proxy ports
+- Only localhost traffic is forwarded; no external network interfaces are exposed
+- The script handles proper startup and cleanup of port forwarding rules
+- Requires sudo access for setting up port filter rules (sudo credentials are cached at the beginning)
+- Uses a trap-based cleanup system to ensure forwarding rules are removed when the script exits
 
 #### Direct Host Method (Anthropic to Qwen):
 ```bash
@@ -191,6 +199,8 @@ The system is designed with graceful shutdown handling:
 1. The main script (`start_dynamic_mlx_proxy.sh`) manages the lifecycle of all components
 2. If the LiteLLM proxy exits, it will automatically terminate the MLX wrapper
 3. If the MLX wrapper exits unexpectedly, the pre-call hook will detect this and shut down the LiteLLM proxy
-4. Signal trapping ensures proper cleanup of all processes on script termination
+4. When HTTPS is enabled, separate HTTP and HTTPS LiteLLM instances are managed
+5. Process IDs are tracked for reliable shutdown and cleanup
+6. Signal trapping ensures proper cleanup of all processes on script termination
 
 This ensures that all components are properly terminated and no orphaned processes are left running.
