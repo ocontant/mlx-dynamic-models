@@ -925,10 +925,20 @@ start_litellm() {
   fi
   
   # Start LiteLLM in background with or without sudo as needed
+  # Set PYTHONPATH for the current environment
+  export PYTHONPATH="$PWD:$PYTHONPATH"
+  
   if (( needs_sudo )); then
-    sudo PYTHONPATH="$PWD:$PYTHONPATH" litellm "${args[@]}" &
+    # Use sudo -E to preserve environment variables
+    # Build a quoted command string to handle array elements properly
+    local cmd_str="litellm"
+    for arg in "${args[@]}"; do
+      cmd_str="$cmd_str '$arg'"
+    done
+    # Run with sudo -E to preserve environment variables
+    sudo -E bash -c "$cmd_str" &
   else
-    PYTHONPATH="$PWD:$PYTHONPATH" litellm "${args[@]}" &
+    litellm "${args[@]}" &
   fi
   
   # Store the PID
