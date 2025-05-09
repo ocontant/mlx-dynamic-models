@@ -1002,7 +1002,6 @@ if (( ENABLE_HTTPS_BOOL )); then
   
   # Start HTTPS server with SSL certificates
   start_litellm "HTTPS" "$TMP_CONFIG" "$HTTPS_BIND_PORT" "--ssl_keyfile_path" "$SSL_KEY" "--ssl_certfile_path" "$SSL_CERT"
-  fi
   if [ $? -ne 0 ]; then
     line_error_up
     echo "ERROR: Failed to start HTTPS instance."
